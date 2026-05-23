@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
-export UID="${UID:-$(id -u)}"
+export UID
 export GID="${GID:-$(id -g)}"
 if [ -f ../.env ]; then set -a; . ../.env; set +a; fi
 case "${1:-start}" in
