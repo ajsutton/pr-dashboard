@@ -1,0 +1,120 @@
+import { describe, expect, test } from "bun:test";
+import { buildPrCards, buildStacks, type RawPr } from "./dashboard-github.ts";
+
+function mkRaw(over: Partial<RawPr> & { repo: string; number: number; baseRefName: string; headRefName: string }): RawPr {
+  return {
+    defaultBranch: "main",
+    title: `PR ${over.number}`,
+    url: `https://github.com/${over.repo}/pull/${over.number}`,
+    isDraft: false,
+    state: "OPEN",
+    reviewDecision: "REVIEW_REQUIRED",
+    mergeable: "MERGEABLE",
+    mergeStateStatus: "BLOCKED",
+    isInMergeQueue: false,
+    headRefOid: `sha-${over.number}`,
+    author: "me",
+    createdAt: "2026-05-20T00:00:00Z",
+    updatedAt: "2026-05-21T00:00:00Z",
+    reviews: [],
+    reviewRequested: [],
+    associatedOnBase: [],
+    checks: [],
+    ...over,
+  };
+}
+
+describe("buildPrCards", () => {
+  test("detects parent PR when baseRef matches another PR's head", () => {
+    const raws: RawPr[] = [
+      mkRaw({ repo: "o/r", number: 1, baseRefName: "main", headRefName: "feat-a" }),
+      mkRaw({
+        repo: "o/r",
+        number: 2,
+        baseRefName: "feat-a",
+        headRefName: "feat-b",
+        associatedOnBase: [{ repo: "o/r", number: 1, state: "OPEN", headRefName: "feat-a" }],
+      }),
+    ];
+    const cards = buildPrCards(raws);
+    expect(cards[0]!.parentPr).toBeUndefined();
+    expect(cards[1]!.parentPr).toEqual({ repo: "o/r", number: 1, state: "OPEN" });
+  });
+});
+
+describe("buildStacks", () => {
+  test("groups a linear stack and orders base-up", () => {
+    const raws: RawPr[] = [
+      mkRaw({ repo: "o/r", number: 1, baseRefName: "main", headRefName: "feat-a" }),
+      mkRaw({
+        repo: "o/r",
+        number: 2,
+        baseRefName: "feat-a",
+        headRefName: "feat-b",
+        associatedOnBase: [{ repo: "o/r", number: 1, state: "OPEN", headRefName: "feat-a" }],
+      }),
+      mkRaw({
+        repo: "o/r",
+        number: 3,
+        baseRefName: "feat-b",
+        headRefName: "feat-c",
+        associatedOnBase: [{ repo: "o/r", number: 2, state: "OPEN", headRefName: "feat-b" }],
+      }),
+    ];
+    const cards = buildPrCards(raws);
+    const stacks = buildStacks(cards);
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]!.prKeys).toEqual(["o/r#1", "o/r#2", "o/r#3"]);
+  });
+
+  test("separate PRs land in separate stacks", () => {
+    const raws: RawPr[] = [
+      mkRaw({ repo: "o/r", number: 1, baseRefName: "main", headRefName: "f-a" }),
+      mkRaw({ repo: "o/r", number: 2, baseRefName: "main", headRefName: "f-b" }),
+    ];
+    const stacks = buildStacks(buildPrCards(raws));
+    expect(stacks).toHaveLength(2);
+    expect(stacks.every((s) => s.prKeys.length === 1)).toBe(true);
+  });
+
+  test("repeated calls on the same cards don't duplicate descendants (poller reuses cards between GitHub refreshes)", () => {
+    const raws: RawPr[] = [
+      mkRaw({ repo: "o/r", number: 1, baseRefName: "main", headRefName: "feat-a" }),
+      mkRaw({
+        repo: "o/r",
+        number: 2,
+        baseRefName: "feat-a",
+        headRefName: "feat-b",
+        associatedOnBase: [{ repo: "o/r", number: 1, state: "OPEN", headRefName: "feat-a" }],
+      }),
+      mkRaw({
+        repo: "o/r",
+        number: 3,
+        baseRefName: "feat-b",
+        headRefName: "feat-c",
+        associatedOnBase: [{ repo: "o/r", number: 2, state: "OPEN", headRefName: "feat-b" }],
+      }),
+    ];
+    const cards = buildPrCards(raws);
+    buildStacks(cards);
+    buildStacks(cards);
+    const stacks = buildStacks(cards);
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]!.prKeys).toEqual(["o/r#1", "o/r#2", "o/r#3"]);
+  });
+
+  test("ignores parent when parent isn't in the visible PR set", () => {
+    const raws: RawPr[] = [
+      mkRaw({
+        repo: "o/r",
+        number: 2,
+        baseRefName: "feat-a",
+        headRefName: "feat-b",
+        associatedOnBase: [{ repo: "o/r", number: 99, state: "MERGED", headRefName: "feat-a" }],
+      }),
+    ];
+    const stacks = buildStacks(buildPrCards(raws));
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]!.prKeys).toEqual(["o/r#2"]);
+  });
+});

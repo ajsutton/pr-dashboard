@@ -1,0 +1,203 @@
+export interface TodoItem {
+  id: string;
+  description: string;
+  descriptionHtml: string;
+  githubUrl: string | undefined;
+  repo: string | undefined;
+  prNumber: number | undefined;
+  type: "Review" | "PR" | "Workstream" | string;
+  status: string;
+  blocked: boolean;
+  priority: string;
+  due: string;
+  doneDate: string;
+}
+
+export interface TodoState {
+  items: TodoItem[];
+  rawMarkdown: string;
+  lastModified: number;
+}
+
+export interface DetailFile {
+  id: string;
+  content: string;
+  contentHtml: string;
+}
+
+export interface GhPrStatus {
+  state: string;
+  isDraft: boolean;
+  statusCheckRollup: string;
+  reviewDecision: string;
+  mergeable: string;
+  isInMergeQueue: boolean;
+}
+
+export type ClaudeChunk =
+  | { kind: "text"; text: string }
+  | { kind: "activity"; tool: string };
+
+export interface DiscoveredItem {
+  repo: string;
+  prNumber: number;
+  title: string;
+  url: string;
+  type: "PR" | "Review" | "Issue";
+  suggestedPriority: string;
+  author: string;
+  linkedPrs?: LinkedPr[];
+}
+
+export interface LinkedPr {
+  repo: string;
+  number: number;
+  title: string;
+  url: string;
+  status: string;
+  priority: string;
+  isDraft: boolean;
+}
+
+export interface UpdateLogEntry {
+  timestamp: string;
+  results: { id: string; description: string; oldStatus: string; newStatus: string; oldPriority: string; newPriority: string; doneDateSet: boolean }[];
+  discoveredCount: number;
+  errors: { id: string; description: string; error: string }[];
+  source: "auto" | "manual";
+}
+
+export interface CiJobStatus {
+  name: string;
+  status: "running" | "success" | "failed" | "blocked" | "canceled" | "queued" | "unknown";
+  startedAt?: string | undefined;
+  stoppedAt?: string | undefined;
+  durationMs?: number | undefined;
+  estimatedDurationMs?: number | undefined;
+  url?: string | undefined;
+  failedTests?: string[] | undefined;
+}
+
+export interface CiWorkflowStatus {
+  id: string;
+  name: string;
+  status: "running" | "success" | "failed" | "blocked" | "canceled" | "queued" | "unknown";
+  createdAt: string;
+  stoppedAt?: string | undefined;
+  jobs: CiJobStatus[];
+  estimatedTotalMs?: number | undefined;
+  elapsedMs: number;
+  progressPct: number;
+  url: string;
+}
+
+export interface CiPipelineStatus {
+  provider: "circleci" | "github" | "unknown";
+  pipelineId?: string | undefined;
+  pipelineNumber?: number | undefined;
+  commit: string;
+  branch?: string | undefined;
+  workflows: CiWorkflowStatus[];
+  rolledUp: "running" | "success" | "failed" | "blocked" | "canceled" | "queued" | "unknown";
+  progressPct: number;
+  elapsedMs: number;
+  estimatedTotalMs?: number | undefined;
+  url?: string | undefined;
+}
+
+export interface PrCard {
+  key: string;
+  repo: string;
+  number: number;
+  title: string;
+  url: string;
+  author: string;
+  isDraft: boolean;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  reviewDecision: "APPROVED" | "REVIEW_REQUIRED" | "CHANGES_REQUESTED" | "" | string;
+  mergeable: string;
+  isInMergeQueue: boolean;
+  headRefName: string;
+  headSha: string;
+  baseRefName: string;
+  defaultBranch: string;
+  createdAt: string;
+  updatedAt: string;
+  reviews: { login: string; state: string; submittedAt: string }[];
+  reviewRequested: string[];
+  parentPr?: { repo: string; number: number; state: string } | undefined;
+  childPrs: { repo: string; number: number; state: string }[];
+  ci?: CiPipelineStatus | undefined;
+}
+
+export interface MergeQueueEntry {
+  repo: string;
+  position: number;
+  prNumber: number;
+  prTitle: string;
+  prUrl: string;
+  author: string;
+  state: "QUEUED" | "MERGEABLE" | "UNMERGEABLE" | "LOCKED" | string;
+  enqueuedAt: string;
+  /** True if the queue entry belongs to the dashboard user. */
+  mine: boolean;
+  ci?: CiPipelineStatus | undefined;
+}
+
+export type CiJobStatusValue = "running" | "success" | "failed" | "blocked" | "canceled" | "queued" | "unknown";
+
+export interface DefaultBranchJobRun {
+  status: CiJobStatusValue;
+  url: string;
+  headSha: string;
+  startedAt: string;
+  stoppedAt?: string | undefined;
+  elapsedMs: number;
+  estimatedDurationMs?: number | undefined;
+  progressPct: number;
+}
+
+export interface DefaultBranchJob {
+  /** Stable identity for view-transition / DOM diffing. */
+  key: string;
+  repo: string;
+  branch: string;
+  /** Workflow name (GitHub Actions workflow or CircleCI workflow). */
+  name: string;
+  /** Most recent run — drives the progress / top portion of the card. */
+  latest: DefaultBranchJobRun;
+  /** Most recent *completed* run — drives the bottom colour. Undefined until at least one run finishes within the window. */
+  lastCompleted?: DefaultBranchJobRun | undefined;
+}
+
+export interface DashboardSnapshot {
+  generatedAt: string;
+  user: string;
+  prs: PrCard[];
+  /** Connected components keyed by stack root, ordered base-up. */
+  stacks: { rootKey: string; prKeys: string[] }[];
+  mergeQueues: { repo: string; entries: MergeQueueEntry[] }[];
+  /** One entry per workflow/job that ran against the default branch in the last 24h. */
+  defaultBranchJobs: DefaultBranchJob[];
+  /** Repo -> default branch name. Lets the client render the ship card without a job. */
+  defaultBranchByRepo: { repo: string; branch: string }[];
+  /**
+   * Ordered list of repos to display. Pinned repos (from DASHBOARD_REPOS)
+   * come first in declared order; PR-discovered repos follow alphabetically.
+   */
+  repos: string[];
+  errors: string[];
+}
+
+export type WsMessage =
+  | { type: "state"; data: TodoState & { detailIds: string[] } }
+  | { type: "detail"; data: DetailFile }
+  | { type: "claude-status"; data: { requestId: string; status: "running" | "done" | "error"; output: string; activity?: string } }
+  | { type: "standup-status"; data: { requestId: string; status: "running" | "done" | "error"; output: string; activity?: string } }
+  | { type: "standup-cache-updated"; data: { output: string; generatedAt: string; forDate: string } }
+  | { type: "update-progress"; data: { current: number; total: number; phase: string; itemId?: string } }
+  | { type: "pending-discovered"; data: { items: DiscoveredItem[]; timestamp: string } }
+  | { type: "items-auto-added"; data: { count: number; items: DiscoveredItem[] } }
+  | { type: "reload" }
+  | { type: "dashboard-snapshot"; data: DashboardSnapshot }
+  | { type: "pong" };
