@@ -112,11 +112,16 @@ const server = Bun.serve({
 });
 
 let rebuildTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingBundleRebuild = false;
 function scheduleReload(needsBundle: boolean) {
+  if (needsBundle) pendingBundleRebuild = true;
   if (rebuildTimer) clearTimeout(rebuildTimer);
   rebuildTimer = setTimeout(async () => {
     rebuildTimer = null;
-    if (needsBundle) await buildDashboardBundle();
+    if (pendingBundleRebuild) {
+      pendingBundleRebuild = false;
+      await buildDashboardBundle();
+    }
     broadcast({ type: "reload" });
   }, 1_000);
 }
