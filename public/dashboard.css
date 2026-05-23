@@ -1,0 +1,829 @@
+/*
+ * PR Radiator — designed to be read from across the room.
+ *
+ * Each card uses background colour as the primary status signal. Text is
+ * secondary. Whitespace is kept thin so colour blocks dominate the page.
+ */
+
+:root {
+  --bg: #0a0e1c;
+  --fg: #ffffff;
+  --fg-dim: rgba(255, 255, 255, 0.72);
+  --fg-mute: rgba(255, 255, 255, 0.48);
+  --border: rgba(255, 255, 255, 0.1);
+
+  /* One colour per status. Used identically wherever that status appears:
+   * card background, left edge, CI band, progress bar, queue card, branch tile. */
+  --ok:      #25c66a;
+  --warn:    #ffd24a;
+  --err:     #ff5147;
+  /* CI running uses the same yellow as awaiting review — both are "in flight". */
+  --run:     #ffd24a;
+  --queue:   #a779eb;
+  --draft:   #8a8f99;
+  --neutral: #aab1c4;
+  /* Used on the footer of a PR that's stacked on another PR — a structural
+   * relationship, not a review state, so it gets its own hue. */
+  --stacked: #5dade2;
+
+  /* Aliases retained so existing rules referencing -bg/-strong still resolve. */
+  --ok-bg: var(--ok);         --ok-strong: var(--ok);
+  --warn-bg: var(--warn);     --warn-strong: var(--warn);
+  --err-bg: var(--err);       --err-strong: var(--err);
+  --run-bg: var(--run);       --run-strong: var(--run);
+  --queue-bg: var(--queue);   --queue-strong: var(--queue);
+  --draft-bg: var(--draft);   --draft-strong: var(--draft);
+  --neutral-strong: var(--neutral);
+
+  /* Bright fills require dark text to stay legible. */
+  --ink: #0a0a0a;
+
+  font-family: "Inter", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+
+html { color-scheme: dark; }
+
+/* Light mode keeps the same saturated status colours (cards/edges/CI bands stay
+ * bright and high-contrast) and only swaps the page background and a few
+ * neutral surfaces. */
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #ffffff;
+    --fg: #0f1530;
+    --fg-dim: rgba(15, 21, 48, 0.7);
+    --fg-mute: rgba(15, 21, 48, 0.55);
+    --border: rgba(15, 21, 48, 0.1);
+  }
+  html { color-scheme: light; }
+  /* Muted CI band needs an opaque light surface, not the dark overlay. */
+  .db-ci[data-tone="muted"] {
+    background: rgba(15, 21, 48, 0.06);
+    color: var(--fg-mute);
+  }
+  /* Failure block: light tint of red so the inset is visible against red CI. */
+  .db-failures { background: rgba(0, 0, 0, 0.12); }
+  /* Queue repo container picks up a faint card surface. */
+  .db-queue-repo {
+    background: #ffffff;
+    border-color: var(--border);
+    box-shadow: 0 1px 2px rgba(15, 21, 48, 0.06);
+  }
+  .db-pr, .db-job { box-shadow: 0 1px 2px rgba(15, 21, 48, 0.08); }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); }
+body { min-height: 100vh; font-size: 16px; }
+
+/* Floating status pill, pinned to the bottom-right corner. Always dark with
+ * white text in both modes — colored cards can sit behind the pill, and a
+ * theme-tinted translucent surface plus dark text loses contrast against them. */
+.db-meta {
+  position: fixed;
+  bottom: 12px;
+  right: 12px;
+  z-index: 50;
+  display: inline-flex;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 10px;
+  background: rgba(10, 14, 28, 0.82);
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  color: #ffffff;
+  font-size: 12px;
+  pointer-events: none;
+}
+.db-meta > * { pointer-events: auto; }
+.db-conn { padding: 3px 10px; border-radius: 4px; font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
+.db-conn[data-state="connecting"] { background: var(--warn); color: var(--ink); }
+.db-conn[data-state="open"]       { background: var(--ok);   color: var(--ink); }
+.db-conn[data-state="closed"]     { background: var(--err);  color: var(--ink); }
+.db-user::before { content: "@"; opacity: 0.5; }
+
+.db-main {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.db-section-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--fg-mute);
+}
+
+/* ============================== PR cards ============================== */
+/*
+ * Stacks no longer have their own container — all PRs are direct grid items
+ * here, sorted so that the PRs in a stack render consecutively in stack order
+ * (root first). The "Stacked on #N" footer + chain glyph on non-root PRs is
+ * what visually ties a stack together.
+ */
+.db-stacks {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 12px;
+}
+
+.db-pr {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border-radius: 8px;
+  /* No `overflow: hidden` — stacked cards anchor a chain chip that needs to
+   * extend into the gap to the left. Children that paint to the edge
+   * (.db-pr-foot) carry their own bottom-corner radius. */
+  background: var(--neutral);
+  color: var(--ink);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.4);
+  flex: 1;
+  transition: background-color 500ms ease-in-out, color 350ms ease-in-out;
+}
+.db-pr-num, .db-pr-state, .db-pr-title { color: var(--ink); text-shadow: none; }
+
+/* Bottom strip: review status colour + review label. */
+.db-pr-foot {
+  padding: 6px 14px 8px;
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  background: var(--neutral);
+  color: var(--ink);
+  margin-top: auto;
+  border-radius: 0 0 8px 8px;
+  transition: background-color 500ms ease-in-out, color 350ms ease-in-out;
+}
+.db-pr-foot[data-review="ok"]    { background: var(--ok); }
+.db-pr-foot[data-review="warn"]  { background: var(--warn); }
+.db-pr-foot[data-review="err"]   { background: var(--err); }
+.db-pr-foot[data-review="queue"] { background: var(--queue); }
+.db-pr-foot[data-review="draft"] { background: var(--draft); }
+.db-pr-foot[data-review="stacked"] { background: var(--stacked); }
+.db-pr-foot-label {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.db-stack-arrow {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+/* Arrow that overlaps the gap to the left of a stacked card, pointing at the
+ * parent (which always sits immediately to the left in stack order). Anchored
+ * to the card and not clipped by it (.db-pr no longer hides overflow).
+ *
+ * Coloured in --stacked with a stacked drop-shadow halo in the page
+ * background colour, so the glyph stays legible over red/green/yellow card
+ * colours as well as the empty gap. */
+.db-pr-bridge {
+  position: absolute;
+  left: -24px;
+  top: 50%;
+  width: 35px;
+  height: 35px;
+  transform: translateY(-50%);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--stacked);
+  filter:
+    drop-shadow(0 0 1.5px var(--bg))
+    drop-shadow(0 0 1.5px var(--bg))
+    drop-shadow(0 0 1.5px var(--bg));
+  pointer-events: none;
+}
+.db-pr-bridge svg { width: 35px; height: 35px; display: block; }
+
+/* Card body colour = CI status (the more time-sensitive signal). */
+.db-pr[data-ci="ok"]      { background: var(--ok);    }
+.db-pr[data-ci="err"]     { background: var(--err);   }
+.db-pr[data-ci="warn"]    { background: var(--warn);  }
+.db-pr[data-ci="run"]     { background: var(--run);   }
+.db-pr[data-ci="blocked"] { background: var(--queue); }
+.db-pr[data-ci="muted"]   { background: var(--neutral); }
+
+
+.db-pr-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 10px 14px 2px;
+}
+.db-pr-num {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+.db-pr-state {
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: rgba(255, 255, 255, 0.85);
+}
+.db-pr-title {
+  display: block;
+  padding: 4px 14px 10px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+  text-decoration: none;
+  line-height: 1.3;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.3);
+}
+.db-pr-title:hover { text-decoration: underline; }
+
+/* ============================== CI footer ============================== */
+.db-ci {
+  padding: 4px 14px 10px;
+  color: var(--ink);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* CI now lives inside the CI-coloured card body, so no separate background.
+ * Default-branch tiles (which also use .db-ci) still get their colour from
+ * the .db-branch wrapper. */
+
+.db-ci-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.db-ci-label {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  color: inherit;
+}
+.db-ci-time {
+  font-size: 12px;
+  color: inherit;
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
+}
+
+.db-bar {
+  position: relative;
+  height: 6px;
+  background: rgba(0, 0, 0, 0.32);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.db-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: rgba(255, 255, 255, 0.85);
+  transition: width 0.5s ease;
+}
+
+.db-failures {
+  margin-top: 4px;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.18);
+  border-left: 3px solid var(--ink);
+  border-radius: 4px;
+  color: var(--ink);
+}
+.db-failures-title {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: inherit;
+}
+.db-failures-job {
+  font-size: 12px;
+  font-weight: 700;
+  margin-top: 2px;
+  color: inherit;
+}
+.db-failures-job a { color: inherit; text-decoration: underline; }
+.db-failures-tests {
+  margin: 4px 0 0;
+  padding-left: 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: inherit;
+}
+/* Used when there are too many failed tests to list — keeps the card height
+ * bounded and lets the eye read the magnitude in one glance. */
+.db-failures-count {
+  margin-top: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  color: inherit;
+  opacity: 0.85;
+}
+
+/* ============================== Merge queue rows (top) ============================== */
+.db-queues {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.db-queue-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) 28px minmax(0, 1fr);
+  align-items: stretch;
+  min-width: 0;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  color: var(--fg);
+  overflow: hidden;
+}
+
+.db-queue-row-ship { display: flex; min-width: 0; }
+.db-queue-row-ship .db-ship-card { flex: 1; min-width: 0; }
+
+.db-repo-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-mute);
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.db-repo-queue { min-width: 0; display: flex; align-items: stretch; }
+.db-repo-queue-cards {
+  flex: 1;
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+/* Slide the whole row down from above the viewport when a repo first
+ * gets a merge-queue PR. Stops at its natural position. */
+@keyframes queue-row-slide-down {
+  from { transform: translateY(-130vh); opacity: 0; }
+  60%  { opacity: 1; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+::view-transition-new(.db-queue-row-entering) {
+  animation: queue-row-slide-down 650ms cubic-bezier(0.2, 0.75, 0.25, 1);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .db-queue-row.queue-row-entering {
+    animation: queue-row-slide-down 650ms cubic-bezier(0.2, 0.75, 0.25, 1) backwards;
+  }
+}
+.db-queue-row.queue-row-entering { view-transition-class: db-queue-row-entering; }
+
+/* ============================== Ship card (left of queue row) ============================== */
+.db-ship-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #2d6dc7 0%, #1a4fa3 55%, #0f3a85 100%);
+  color: #fff;
+  overflow: hidden;
+}
+.db-ship-card .db-branch-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  position: relative;
+  z-index: 2;
+}
+.db-ship-card .db-branch-owner { color: rgba(255, 255, 255, 0.7); }
+.db-ship-card .db-branch-repo { color: #fff; }
+.db-ship-card .db-branch-name { color: rgba(255, 255, 255, 0.85); }
+
+.db-ship-anchor {
+  position: relative;
+  height: 56px;
+  margin: 4px -6px -4px;
+  overflow: hidden;
+}
+.db-ship-anchor::before {
+  /* Sea line — a softer band of darker blue along the bottom half. */
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 60%;
+  background: linear-gradient(180deg, rgba(8, 30, 70, 0) 0%, rgba(8, 30, 70, 0.55) 60%, rgba(8, 30, 70, 0.8) 100%);
+}
+.db-ship-wrap {
+  position: absolute;
+  left: 50%;
+  bottom: 6px;
+  width: 64px;
+  height: 32px;
+  margin-left: -32px;
+  will-change: transform;
+}
+.db-ship-svg { display: block; width: 100%; height: 100%; }
+
+/* Gentle idle bob so the ship feels alive while waiting for the next merge. */
+@keyframes ship-bob {
+  0%, 100% { transform: translateY(0) rotate(-1deg); }
+  50%      { transform: translateY(-2px) rotate(1deg); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .db-ship-svg { animation: ship-bob 3s ease-in-out infinite; transform-origin: 50% 80%; }
+}
+
+/* ============================== Project branch workflow cards ============================== */
+.db-jobs {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.db-jobs-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+}
+
+.db-job {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--neutral);
+  color: var(--ink);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.4);
+  min-height: 110px;
+  transition: background-color 500ms ease-in-out, color 350ms ease-in-out;
+}
+.db-job[data-head-tone="ok"]      { background: var(--ok); }
+.db-job[data-head-tone="err"]     { background: var(--err); }
+.db-job[data-head-tone="warn"]    { background: var(--warn); }
+.db-job[data-head-tone="run"]     { background: var(--run); }
+.db-job[data-head-tone="muted"]   { background: var(--neutral); }
+
+.db-job-head {
+  padding: 10px 14px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-decoration: none;
+  color: inherit;
+}
+.db-job-head:hover .db-job-name { text-decoration: underline; }
+.db-job-project {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  opacity: 0.78;
+  overflow-wrap: anywhere;
+}
+.db-job-project-owner {
+  opacity: 0.6;
+  font-weight: 600;
+}
+.db-job-project-repo {
+  font-weight: 800;
+}
+.db-job-project-branch {
+  margin-left: auto;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
+}
+.db-job-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+.db-job-repo {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  opacity: 0.7;
+  overflow-wrap: anywhere;
+}
+.db-job-status {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
+}
+.db-job-name {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+.db-job-time {
+  font-size: 12px;
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
+}
+
+.db-job-foot {
+  margin-top: auto;
+  padding: 6px 14px 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  background: var(--neutral);
+  color: var(--ink);
+  text-decoration: none;
+  transition: background-color 500ms ease-in-out, color 350ms ease-in-out;
+}
+.db-job-foot[data-tone="ok"]    { background: var(--ok); }
+.db-job-foot[data-tone="err"]   { background: var(--err); }
+.db-job-foot[data-tone="warn"]  { background: var(--warn); }
+.db-job-foot[data-tone="run"]   { background: var(--run); }
+.db-job-foot[data-tone="muted"] { background: var(--neutral); color: var(--fg-dim); }
+.db-job-foot-label {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.db-job-foot-age {
+  font-size: 11px;
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+.db-job-foot:hover .db-job-foot-label { text-decoration: underline; }
+
+/* Smooth crossfade + position/size interpolation between renders. */
+::view-transition-group(*) { animation-duration: 280ms; }
+
+/* PR / queue cards crossfade longer than the default 250ms so colour
+ * changes (CI status flips, review-state changes) feel smooth rather
+ * than a quick blink. The group still interpolates at 280ms — only the
+ * old/new snapshot opacity ramp is stretched. */
+::view-transition-old(.pr-card),
+::view-transition-new(.pr-card) {
+  animation-duration: 500ms;
+  animation-timing-function: ease-in-out;
+}
+
+/* Per-PR lifecycle classes drive entry/exit/eject animations. The PR card
+ * and the merge-queue card both opt-in so the same animations play whether
+ * the PR currently lives in the stack or the queue. */
+.db-pr,
+.db-queue-card { view-transition-class: pr-card; }
+.db-pr.pr-entering,
+.db-queue-card.pr-entering { view-transition-class: pr-card pr-entering; }
+.db-pr.pr-exiting,
+.db-queue-card.pr-exiting { view-transition-class: pr-card pr-exiting; }
+.db-pr.pr-ejecting,
+.db-queue-card.pr-ejecting { view-transition-class: pr-card pr-ejecting; }
+
+/* Entrance: fly up from below the viewport into final position. */
+@keyframes pr-slide-up {
+  from { transform: translateY(110vh); opacity: 0; }
+  60%  { opacity: 1; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+::view-transition-new(.pr-entering) {
+  animation: pr-slide-up 650ms cubic-bezier(0.2, 0.75, 0.25, 1);
+}
+/* Fallback when View Transitions aren't supported. */
+@media (prefers-reduced-motion: no-preference) {
+  .db-pr.pr-entering,
+  .db-queue-card.pr-entering {
+    animation: pr-slide-up 650ms cubic-bezier(0.2, 0.75, 0.25, 1) backwards;
+  }
+}
+
+/* Exit: come loose, tumble, then drop off the bottom. */
+@keyframes pr-drop-off {
+  0%   { transform: translate(0, 0) rotate(0deg); opacity: 1; }
+  15%  { transform: translate(-6px, 4px) rotate(-4deg); opacity: 1; }
+  30%  { transform: translate(8px, 10px) rotate(6deg); opacity: 1; }
+  100% { transform: translate(20px, 110vh) rotate(28deg); opacity: 0; }
+}
+::view-transition-old(.pr-exiting) {
+  animation: pr-drop-off 800ms cubic-bezier(0.45, 0, 0.7, 1);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .db-pr.pr-exiting,
+  .db-queue-card.pr-exiting {
+    animation: pr-drop-off 800ms cubic-bezier(0.45, 0, 0.7, 1) forwards;
+  }
+}
+
+/* Ejection: PR thrown back out of the merge queue. Default view-transition
+ * group already interpolates from queue position back down to the stack;
+ * layer a red flash on top of the snapshots so it reads as "rejected". */
+@keyframes pr-eject-flash {
+  0%   { filter: none; }
+  35%  { filter: drop-shadow(0 0 24px var(--err)) brightness(1.25); }
+  70%  { filter: drop-shadow(0 0 16px var(--err)) brightness(1.1); }
+  100% { filter: none; }
+}
+::view-transition-old(.pr-ejecting),
+::view-transition-new(.pr-ejecting) {
+  animation: pr-eject-flash 600ms ease-out;
+}
+::view-transition-group(.pr-ejecting) {
+  animation-duration: 600ms;
+}
+/* Fallback: pulse the real element. */
+@media (prefers-reduced-motion: no-preference) {
+  .db-pr.pr-ejecting,
+  .db-queue-card.pr-ejecting {
+    animation: pr-eject-flash 600ms ease-out;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) { animation: none !important; }
+  .db-pr,
+  .db-queue-card { animation: none !important; }
+}
+
+/* Explosion for other people's PRs ejected from the merge queue: a hot
+ * radial flash plus particles flung outward from the queue card center.
+ * Driven by the body-overlay clone in dashboard.js (runExplosions). */
+.pr-explode-flash {
+  position: absolute;
+  inset: -10%;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle, rgba(255,255,200,0.95) 0%, var(--err) 30%, rgba(255,90,90,0.55) 55%, transparent 75%);
+  opacity: 0;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  animation: pr-explode-flash-anim 360ms ease-out forwards;
+}
+@keyframes pr-explode-flash-anim {
+  0%   { opacity: 0; transform: scale(0.4); }
+  25%  { opacity: 1; transform: scale(1.15); }
+  100% { opacity: 0; transform: scale(1.7); }
+}
+
+.pr-explode-particle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #fff 0%, var(--err) 60%, rgba(255,90,90,0) 100%);
+  box-shadow:
+    0 0 8px var(--err),
+    0 0 16px rgba(255, 120, 80, 0.7);
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pr-explode-flash,
+  .pr-explode-particle { display: none !important; }
+}
+
+.db-branch-id {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.db-branch-owner {
+  font-size: 11px;
+  opacity: 0.65;
+  letter-spacing: 0.02em;
+  overflow-wrap: anywhere;
+}
+.db-branch-repo {
+  font-weight: 800;
+  font-size: 15px;
+  letter-spacing: -0.01em;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.15;
+}
+.db-branch-name {
+  font-size: 11px;
+  opacity: 0.7;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+/* ============================== Merge queue cards ============================== */
+.db-queue-card {
+  flex: 0 0 200px;
+  background: var(--neutral);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 10px 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  position: relative;
+  overflow: hidden;
+  transition: background-color 500ms ease-in-out, color 350ms ease-in-out;
+}
+.db-queue-card[data-tone="ok"]      { background: var(--ok); }
+.db-queue-card[data-tone="err"]     { background: var(--err); }
+.db-queue-card[data-tone="warn"]    { background: var(--warn); }
+.db-queue-card[data-tone="run"]     { background: var(--run); }
+.db-queue-card[data-tone="blocked"] { background: var(--queue); }
+.db-queue-card a { color: inherit; }
+.db-queue-card .db-queue-pos { color: var(--ink); opacity: 0.7; font-size: 11px; font-weight: 800; letter-spacing: 0.08em; }
+.db-queue-time {
+  font-size: 11px;
+  color: var(--ink);
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
+}
+.db-queue-owner {
+  margin: 8px -12px 0;
+  padding: 4px 12px;
+  background: rgba(0, 0, 0, 0.2);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.db-queue-owner[data-mine="true"] {
+  background: var(--ink);
+  color: #fff;
+}
+.db-queue-card::before {
+  content: "‹";
+  position: absolute;
+  left: -10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--fg-mute);
+  font-size: 22px;
+  font-weight: 800;
+}
+.db-queue-card:first-child::before { display: none; }
+.db-queue-pos { font-size: 11px; font-weight: 800; letter-spacing: 0.1em; opacity: 0.75; }
+.db-queue-pr { font-size: 14px; font-weight: 700; }
+.db-queue-pr a { color: inherit; text-decoration: none; }
+.db-queue-pr a:hover { text-decoration: underline; }
+.db-queue-author { font-size: 11px; opacity: 0.75; }
+
+/* ============================== Empty states ============================== */
+.db-empty {
+  color: var(--fg-mute);
+  font-size: 13px;
+  padding: 8px 0;
+}
+
+/* ============================== Radiator mode (large screens) ============================== */
+@media (min-width: 1600px) {
+  body { font-size: 18px; }
+  .db-title { font-size: 32px; }
+  .db-stacks { grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); }
+  .db-jobs-grid { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+  .db-job-project { font-size: 13px; }
+  .db-job-project-branch { font-size: 11px; }
+  .db-pr-num { font-size: 30px; }
+  .db-pr-title { font-size: 19px; }
+  .db-ci-label { font-size: 16px; }
+  .db-ci-time { font-size: 14px; }
+  .db-branch-repo { font-size: 20px; }
+  .db-job-name { font-size: 17px; }
+  .db-queue-card { flex-basis: 240px; }
+  .db-queue-pr { font-size: 17px; }
+}
+
+@media (min-width: 2200px) {
+  body { font-size: 22px; }
+  .db-title { font-size: 44px; }
+  .db-pr-num { font-size: 42px; }
+  .db-pr-title { font-size: 24px; }
+  .db-ci-label { font-size: 20px; }
+  .db-job-name { font-size: 22px; }
+}
