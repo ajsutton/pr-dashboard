@@ -1,0 +1,24 @@
+services:
+  todo-ui-dashboard:
+    build: .
+    # image: ghcr.io/ajsutton/todo-ui-dashboard:latest
+    container_name: todo-ui-dashboard
+    user: "${UID}:${GID}"
+    command: ["bun", "--watch", "/app/src/server.ts"]
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:3456:3456"
+    environment:
+      DASHBOARD_REPOS: ${DASHBOARD_REPOS:-}
+    volumes:
+      - "./src:/app/src"
+      - "./public:/app/public"
+    secrets:
+      - gh_token
+      - ci_token
+    restart: unless-stopped
+
+secrets:
+  gh_token:
+    file: ../.secrets/gh_token
+  ci_token:
+    file: ../.secrets/ci_token
