@@ -410,6 +410,18 @@ body { min-height: 100vh; font-size: 16px; }
   padding-bottom: 4px;
 }
 
+/* On narrow viewports the 280px ship card would consume nearly all the
+ * horizontal space and push the queue cards off to the right, so stack
+ * the row vertically: ship on top, queue below using the full width. */
+@media (max-width: 720px) {
+  .db-queue-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+  .db-repo-arrow { display: none; }
+  .db-ship-anchor { height: 36px; }
+}
+
 /* Slide the whole row down from above the viewport when a repo first
  * gets a merge-queue PR. Stops at its natural position. */
 @keyframes queue-row-slide-down {
