@@ -587,12 +587,16 @@ export function buildPrCards(raws: RawPr[]): PrCard[] {
   for (const pr of raws) byKey.set(`${pr.repo}#${pr.number}`, pr);
 
   const cards: PrCard[] = raws.map((pr) => {
-    // Same-repo only: GitHub's baseRef.associatedPullRequests can return PRs
-    // from forks whose headRefName collides with our baseRefName (e.g. a fork's
-    // "develop" branch). Those aren't real stack parents.
-    const parent = pr.associatedOnBase.find(
-      (a) => a.repo === pr.repo && a.headRefName === pr.baseRefName && a.number !== pr.number,
-    );
+    // A PR targeting its repo's default branch is a stack root by definition —
+    // any matching candidate is either a fork (different repo) or a "merge
+    // default-branch into X" sync PR (same repo, but head=default branch).
+    // Also: same-repo only, since GitHub's associatedPullRequests can return
+    // fork PRs whose head-ref name collides with our base ref.
+    const parent = pr.baseRefName === pr.defaultBranch
+      ? undefined
+      : pr.associatedOnBase.find(
+          (a) => a.repo === pr.repo && a.headRefName === pr.baseRefName && a.number !== pr.number,
+        );
     const card: PrCard = {
       key: `${pr.repo}#${pr.number}`,
       repo: pr.repo,

@@ -42,6 +42,27 @@ describe("buildPrCards", () => {
     expect(cards[1]!.parentPr).toEqual({ repo: "o/r", number: 1, state: "OPEN" });
   });
 
+  test("PR targeting default branch is never stacked (default-branch sync PRs aren't parents)", () => {
+    // Real case: ethereum-optimism/optimism PR targeting "develop" was matched
+    // against PR #958 ("Develop Master Merge", head=develop, base=master).
+    // A PR targeting the repo's default branch is a root by definition; any
+    // other PR whose head is the default branch is a sync PR, not a parent.
+    const raws: RawPr[] = [
+      mkRaw({
+        repo: "o/r",
+        number: 100,
+        baseRefName: "develop",
+        headRefName: "aj/feat/x",
+        defaultBranch: "develop",
+        associatedOnBase: [
+          { repo: "o/r", number: 958, state: "MERGED", headRefName: "develop" },
+        ],
+      }),
+    ];
+    const cards = buildPrCards(raws);
+    expect(cards[0]!.parentPr).toBeUndefined();
+  });
+
   test("ignores cross-repo associatedOnBase matches (forks of upstream share branch names)", () => {
     // GitHub's baseRef.associatedPullRequests can return PRs from forks whose
     // headRefName collides with our baseRefName — e.g. omgnetwork/optimism#9
