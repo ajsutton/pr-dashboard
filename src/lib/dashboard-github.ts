@@ -32,6 +32,7 @@ export interface RawPr {
   mergeable: string;
   mergeStateStatus: string;
   isInMergeQueue: boolean;
+  autoMergeEnabled: boolean;
   baseRefName: string;
   headRefName: string;
   headRefOid: string;
@@ -287,6 +288,7 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
               mergeable
               mergeStateStatus
               mergeQueueEntry { id }
+              autoMergeRequest { enabledAt }
               baseRefName
               headRefName
               headRefOid
@@ -565,6 +567,7 @@ function normalizePr(n: Record<string, unknown>): RawPr {
     mergeable: (n["mergeable"] as string) ?? "",
     mergeStateStatus: (n["mergeStateStatus"] as string) ?? "",
     isInMergeQueue: n["mergeQueueEntry"] != null,
+    autoMergeEnabled: n["autoMergeRequest"] != null,
     baseRefName: (n["baseRefName"] as string) ?? "",
     headRefName: (n["headRefName"] as string) ?? "",
     headRefOid: (commit?.["oid"] as string) ?? "",
@@ -599,6 +602,7 @@ export function buildPrCards(raws: RawPr[]): PrCard[] {
       reviewDecision: pr.reviewDecision,
       mergeable: pr.mergeable,
       isInMergeQueue: pr.isInMergeQueue,
+      autoMergeEnabled: pr.autoMergeEnabled,
       headRefName: pr.headRefName,
       headSha: pr.headRefOid,
       baseRefName: pr.baseRefName,

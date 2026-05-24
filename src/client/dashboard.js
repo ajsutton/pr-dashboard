@@ -189,9 +189,26 @@ function lifecycleClass(key) {
   return "";
 }
 
+// Derive a PR href from the origin of an existing PR URL — so the link tracks
+// whichever GitHub host (github.com / GHE) the dashboard is talking to.
+function prHref(siblingPrUrl, repo, number) {
+  let origin = "https://github.com";
+  try { origin = new URL(siblingPrUrl).origin; } catch {}
+  return `${origin}/${repo}/pull/${number}`;
+}
+
 // Left-pointing arrow: the parent always renders just before this card in
 // the flattened grid, so the glyph points back at it.
 const STACK_ARROW_SVG = `<svg class="db-stack-arrow" viewBox="0 0 16 16" aria-hidden="true"><path d="M15 8 H1 M1 8 L6 3 M1 8 L6 13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+// Small "AUTO" chip — explicit text reads at a glance against any footer
+// background, inherits colour from the footer so it stays legible on red /
+// green / yellow / blue.
+const AUTOMERGE_SVG = `<svg class="db-pr-foot-automerge-svg" viewBox="0 0 40 18" aria-hidden="true"><rect x="0.75" y="0.75" width="38.5" height="16.5" rx="3.5" fill="rgba(0,0,0,0.18)" stroke="currentColor" stroke-width="1.5"/><text x="20" y="13" fill="currentColor" font-size="10" font-weight="800" text-anchor="middle" letter-spacing="0.8" font-family="-apple-system,system-ui,sans-serif">AUTO</text></svg>`;
+
+// Red triangle with white border + white "!" — the white border keeps it
+// visible on red CI-failure footers as well as the other tones.
+const CONFLICT_ICON_SVG = `<svg class="db-pr-foot-conflict-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.6 L14.7 13.5 L1.3 13.5 Z" fill="#ff5147" stroke="#ffffff" stroke-width="1.2" stroke-linejoin="round"/><rect x="7.15" y="5.6" width="1.7" height="4.6" rx="0.4" fill="#ffffff"/><circle cx="8" cy="11.7" r="0.95" fill="#ffffff"/></svg>`;
 
 function renderPr(pr, opts = {}) {
   const ciStatus = pr.ci?.rolledUp ?? "none";
@@ -199,15 +216,24 @@ function renderPr(pr, opts = {}) {
   const conflicts = pr.mergeable === "CONFLICTING";
   const vt = prVtName(pr.repo, pr.number);
   const lc = lifecycleClass(pr.key);
-  // Children of a visible-stack parent show "Stacked on #N" instead of their
-  // review label — the structural relationship is more useful here, and you
-  // can't land the child until the parent merges anyway.
-  const stackedOn = opts.stackParentNumber ?? null;
-  const review = stackedOn != null ? "stacked" : reviewTone(pr);
-  const footLabel = stackedOn != null
-    ? `${STACK_ARROW_SVG}<span>Stacked on #${stackedOn}${conflicts ? " · Conflicts" : ""}</span>`
-    : `<span>${reviewLabel(pr)}${conflicts ? " · CONFLICTS" : ""}</span>`;
-  const bridgeHtml = stackedOn != null
+  // Any PR with a parent PR gets the "Stacked on #N" footer + blue tone —
+  // including PRs whose parent is in the merge queue or belongs to another
+  // author (parent isn't on the dashboard, but the relationship still
+  // matters: you can't land the child until the parent merges). The chain
+  // bridge arrow is a *visual* link to the parent card immediately to the
+  // left in the grid, so it only renders when that adjacency exists.
+  const parent = pr.parentPr ?? null;
+  const parentAdjacent = !!opts.parentAdjacent;
+  const review = parent ? "stacked" : reviewTone(pr);
+  const conflictHtml = conflicts ? ` · ${CONFLICT_ICON_SVG}CONFLICT` : "";
+  const parentUrl = parent ? prHref(pr.url, parent.repo, parent.number) : "";
+  const labelHtml = parent
+    ? `${STACK_ARROW_SVG}<span>Stacked on <a href="${escapeAttr(parentUrl)}" target="_blank" rel="noopener">#${parent.number}</a>${conflictHtml}</span>`
+    : `<span>${reviewLabel(pr)}${conflictHtml}</span>`;
+  const automergeHtml = pr.autoMergeEnabled
+    ? `<span class="db-pr-foot-automerge" title="Auto-merge enabled" aria-label="Auto-merge enabled">${AUTOMERGE_SVG}</span>`
+    : "";
+  const bridgeHtml = parentAdjacent
     ? `<div class="db-pr-bridge" aria-hidden="true">${STACK_ARROW_SVG}</div>`
     : "";
   return `
@@ -219,7 +245,8 @@ function renderPr(pr, opts = {}) {
       <a class="db-pr-title" href="${escapeAttr(pr.url)}" target="_blank" rel="noopener">${escapeHtml(pr.title)}</a>
       ${renderCi(pr.ci)}
       <footer class="db-pr-foot" data-review="${review}">
-        <span class="db-pr-foot-label">${footLabel}</span>
+        <span class="db-pr-foot-label">${labelHtml}</span>
+        ${automergeHtml}
       </footer>
     </article>
   `;
@@ -259,10 +286,8 @@ function renderStacks(snap) {
       const parentKey = pr.parentPr
         ? `${pr.parentPr.repo}#${pr.parentPr.number}`
         : null;
-      const stackParentNumber = parentKey && visibleKeys.has(parentKey)
-        ? pr.parentPr.number
-        : null;
-      return renderPr(pr, { stackParentNumber });
+      const parentAdjacent = parentKey != null && visibleKeys.has(parentKey);
+      return renderPr(pr, { parentAdjacent });
     })
     .join("");
   stacksEl.innerHTML = html;

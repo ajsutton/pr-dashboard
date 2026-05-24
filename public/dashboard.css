@@ -180,6 +180,43 @@ body { min-height: 100vh; font-size: 16px; }
   flex: none;
 }
 
+/* Links inside the footer (e.g. parent PR number in "Stacked on #N") inherit
+ * the footer's ink colour so they stay legible on every tone — the underline
+ * is what tells the eye it's a link. */
+.db-pr-foot a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 1px;
+}
+
+/* Conflict warning glyph: red triangle with white border + white "!" so the
+ * icon stays visible against red CI-failure footers as well as the other
+ * tones. Sits inline inside the footer text, aligned to the caps height. */
+.db-pr-foot-conflict-icon {
+  width: 14px;
+  height: 14px;
+  display: inline-block;
+  vertical-align: -2px;
+  margin-right: 2px;
+}
+
+/* Auto-merge indicator — pushed to the right edge of the footer with
+ * margin-left:auto so it sits opposite the review label. The SVG itself
+ * inherits currentColor so the chip border + "AUTO" text track the footer
+ * tone's ink colour. */
+.db-pr-foot-automerge {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  opacity: 0.9;
+}
+.db-pr-foot-automerge-svg {
+  height: 14px;
+  width: auto;
+  display: block;
+}
+
 /* Arrow that overlaps the gap to the left of a stacked card, pointing at the
  * parent (which always sits immediately to the left in stack order). Anchored
  * to the card and not clipped by it (.db-pr no longer hides overflow).

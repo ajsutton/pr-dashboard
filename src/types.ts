@@ -48,6 +48,7 @@ export interface PrCard {
   reviewDecision: "APPROVED" | "REVIEW_REQUIRED" | "CHANGES_REQUESTED" | "" | string;
   mergeable: string;
   isInMergeQueue: boolean;
+  autoMergeEnabled: boolean;
   headRefName: string;
   headSha: string;
   baseRefName: string;

@@ -12,6 +12,7 @@ function mkRaw(over: Partial<RawPr> & { repo: string; number: number; baseRefNam
     mergeable: "MERGEABLE",
     mergeStateStatus: "BLOCKED",
     isInMergeQueue: false,
+    autoMergeEnabled: false,
     headRefOid: `sha-${over.number}`,
     author: "me",
     createdAt: "2026-05-20T00:00:00Z",
@@ -39,6 +40,18 @@ describe("buildPrCards", () => {
     const cards = buildPrCards(raws);
     expect(cards[0]!.parentPr).toBeUndefined();
     expect(cards[1]!.parentPr).toEqual({ repo: "o/r", number: 1, state: "OPEN" });
+  });
+
+  test("propagates autoMergeEnabled from RawPr to PrCard", () => {
+    const raws: RawPr[] = [
+      mkRaw({ repo: "o/r", number: 1, baseRefName: "main", headRefName: "feat-a", autoMergeEnabled: true }),
+      mkRaw({ repo: "o/r", number: 2, baseRefName: "main", headRefName: "feat-b", autoMergeEnabled: false }),
+      mkRaw({ repo: "o/r", number: 3, baseRefName: "main", headRefName: "feat-c" }),
+    ];
+    const cards = buildPrCards(raws);
+    expect(cards[0]!.autoMergeEnabled).toBe(true);
+    expect(cards[1]!.autoMergeEnabled).toBe(false);
+    expect(cards[2]!.autoMergeEnabled).toBe(false);
   });
 });
 
