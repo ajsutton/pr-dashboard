@@ -34,6 +34,35 @@ describe("getTestCycle", () => {
   it("trims whitespace around state names", () => {
     expect(getTestCycle("?test=passing,%20failing")).toEqual(["passing", "failing"]);
   });
+
+  it("keeps base+modifier specs in the cycle (URLSearchParams decodes `+` to a space)", () => {
+    // The browser turns `?test=passing+autoMergeEnabled` into the value
+    // `"passing autoMergeEnabled"`, which our parser treats the same as
+    // the literal `"passing+autoMergeEnabled"` form.
+    expect(getTestCycle("?test=passing+autoMergeEnabled,failing+conflict")).toEqual([
+      "passing autoMergeEnabled",
+      "failing conflict",
+    ]);
+  });
+
+  it("accepts an explicitly-encoded `%2B` to preserve the literal `+`", () => {
+    expect(getTestCycle("?test=passing%2BautoMergeEnabled")).toEqual([
+      "passing+autoMergeEnabled",
+    ]);
+  });
+
+  it("drops entries with an unknown base even when modifiers are valid", () => {
+    expect(getTestCycle("?test=bogus%2BautoMergeEnabled,passing%2Bconflict")).toEqual([
+      "passing+conflict",
+    ]);
+  });
+
+  it("keeps entries with unknown modifiers (modifiers themselves are dropped on apply)", () => {
+    expect(getTestCycle("?test=passing%2Bnopemod,failing")).toEqual([
+      "passing+nopemod",
+      "failing",
+    ]);
+  });
 });
 
 describe("injectTestPr", () => {
@@ -91,6 +120,49 @@ describe("injectTestPr", () => {
       expect(snap.defaultBranchByRepo.find((d) => d.repo === TEST_REPO)).toBeDefined();
       expect(snap.repos).toContain(TEST_REPO);
     }
+  });
+
+  it("applies autoMergeEnabled modifier on top of a base state", () => {
+    const snap = injectTestPr(emptyTestSnapshot(), "passing+autoMergeEnabled");
+    expect(snap.prs[0].autoMergeEnabled).toBe(true);
+    expect(snap.prs[0].ci.rolledUp).toBe("success");
+    expect(snap.prs[0].reviewDecision).toBe("APPROVED");
+  });
+
+  it("applies conflict modifier", () => {
+    const snap = injectTestPr(emptyTestSnapshot(), "failing+conflict");
+    expect(snap.prs[0].mergeable).toBe("CONFLICTING");
+    expect(snap.prs[0].ci.rolledUp).toBe("failed");
+  });
+
+  it("approved modifier promotes review state on top of a non-approving base", () => {
+    const snap = injectTestPr(emptyTestSnapshot(), "failing+approved");
+    expect(snap.prs[0].reviewDecision).toBe("APPROVED");
+    expect(snap.prs[0].ci.rolledUp).toBe("failed");
+  });
+
+  it("stacked modifier attaches a not-on-dashboard parent so the new 'Stacked on #N' path fires", () => {
+    const snap = injectTestPr(emptyTestSnapshot(), "passing+stacked");
+    expect(snap.prs[0].parentPr).toBeDefined();
+    expect(snap.prs[0].parentPr.repo).toBe("demo/test-pr");
+    expect(typeof snap.prs[0].parentPr.number).toBe("number");
+    // The parent isn't injected into snap.prs, so the bridge-arrow path
+    // doesn't trigger — exactly the case the new behaviour covers.
+    expect(snap.prs).toHaveLength(1);
+  });
+
+  it("combines multiple modifiers in one spec", () => {
+    const snap = injectTestPr(emptyTestSnapshot(), "awaiting+autoMergeEnabled+conflict");
+    const pr = snap.prs[0];
+    expect(pr.autoMergeEnabled).toBe(true);
+    expect(pr.mergeable).toBe("CONFLICTING");
+    expect(pr.reviewDecision).toBe("REVIEW_REQUIRED");
+  });
+
+  it("silently ignores unknown modifiers", () => {
+    const snap = injectTestPr(emptyTestSnapshot(), "passing+nopemod");
+    expect(snap.prs[0].autoMergeEnabled).toBeUndefined();
+    expect(snap.prs[0].mergeable).toBe("MERGEABLE");
   });
 
   it("layers on top of an existing snapshot without mutating it", () => {

@@ -42,6 +42,26 @@ describe("buildPrCards", () => {
     expect(cards[1]!.parentPr).toEqual({ repo: "o/r", number: 1, state: "OPEN" });
   });
 
+  test("ignores cross-repo associatedOnBase matches (forks of upstream share branch names)", () => {
+    // GitHub's baseRef.associatedPullRequests can return PRs from forks whose
+    // headRefName collides with our baseRefName — e.g. omgnetwork/optimism#9
+    // with headRefName "develop" is not a parent of ethereum-optimism/optimism PRs
+    // targeting "develop". Parent must be in the same repo.
+    const raws: RawPr[] = [
+      mkRaw({
+        repo: "ethereum-optimism/optimism",
+        number: 20997,
+        baseRefName: "develop",
+        headRefName: "aj/chore/x",
+        associatedOnBase: [
+          { repo: "omgnetwork/optimism", number: 9, state: "MERGED", headRefName: "develop" },
+        ],
+      }),
+    ];
+    const cards = buildPrCards(raws);
+    expect(cards[0]!.parentPr).toBeUndefined();
+  });
+
   test("propagates autoMergeEnabled from RawPr to PrCard", () => {
     const raws: RawPr[] = [
       mkRaw({ repo: "o/r", number: 1, baseRefName: "main", headRefName: "feat-a", autoMergeEnabled: true }),

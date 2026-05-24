@@ -587,8 +587,11 @@ export function buildPrCards(raws: RawPr[]): PrCard[] {
   for (const pr of raws) byKey.set(`${pr.repo}#${pr.number}`, pr);
 
   const cards: PrCard[] = raws.map((pr) => {
+    // Same-repo only: GitHub's baseRef.associatedPullRequests can return PRs
+    // from forks whose headRefName collides with our baseRefName (e.g. a fork's
+    // "develop" branch). Those aren't real stack parents.
     const parent = pr.associatedOnBase.find(
-      (a) => a.headRefName === pr.baseRefName && a.number !== pr.number,
+      (a) => a.repo === pr.repo && a.headRefName === pr.baseRefName && a.number !== pr.number,
     );
     const card: PrCard = {
       key: `${pr.repo}#${pr.number}`,

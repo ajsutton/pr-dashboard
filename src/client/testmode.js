@@ -21,11 +21,52 @@ const TEST_TITLE = "TEST PR — demo cycle through dashboard states";
 export const TEST_STATES = ["passing", "awaiting", "failing", "failing-partial", "queued", "merged"];
 
 /**
- * Returns the ordered cycle of states for test mode, or `null` if the URL
- * doesn't enable test mode. `?test` (or `?test=`) returns every state in
- * declaration order; `?test=passing,failing,merged` returns just the
- * requested subset (unknown names are dropped, and falling back to the full
- * cycle when nothing valid remains).
+ * Additive modifiers that can be appended to any base state with `+`:
+ *   ?test=passing+autoMergeEnabled+conflict
+ * Each modifier is applied in turn to the synthesised PR card after the
+ * base state has built it. Unknown modifier names within an otherwise-valid
+ * entry are dropped silently.
+ *
+ * `stacked` simulates the new no-bridge-arrow case where the parent PR
+ * isn't on the dashboard (e.g. it's in the merge queue or owned by another
+ * author) — the child still surfaces "Stacked on #N" with the #N as a
+ * link.
+ */
+const MODIFIERS = {
+  autoMergeEnabled: (pr) => { pr.autoMergeEnabled = true; },
+  conflict: (pr) => { pr.mergeable = "CONFLICTING"; },
+  approved: (pr) => { pr.reviewDecision = "APPROVED"; },
+  stacked: (pr) => {
+    pr.parentPr = { repo: TEST_REPO, number: TEST_PR_NUMBER - 1, state: "OPEN" };
+  },
+};
+export const TEST_MODIFIERS = Object.keys(MODIFIERS);
+
+/**
+ * `?test=passing+autoMergeEnabled` → `{ base: "passing", mods: Set("autoMergeEnabled") }`.
+ *
+ * Accepts `+` *or* whitespace between tokens: `URLSearchParams` decodes a
+ * raw `+` in a query string as a space (form-urlencoded convention), so a
+ * URL like `?test=passing+autoMergeEnabled` reaches us as
+ * `"passing autoMergeEnabled"`. Treating both characters as separators
+ * lets the user type `+` in the URL bar (the common case) *and* lets us
+ * round-trip the canonical `+` form through `injectTestPr` directly.
+ *
+ * Unknown modifier names are dropped silently; the base is returned as-is
+ * and is validated by the caller.
+ */
+function parseStateSpec(spec) {
+  const [base, ...modList] = spec.split(/[+\s]+/).filter(Boolean);
+  const mods = new Set(modList.filter((m) => Object.prototype.hasOwnProperty.call(MODIFIERS, m)));
+  return { base: base ?? "", mods };
+}
+
+/**
+ * Returns the ordered cycle of state specs for test mode, or `null` if the
+ * URL doesn't enable test mode. `?test` (or `?test=`) returns every base
+ * state in declaration order; `?test=passing,failing+conflict,merged` keeps
+ * the supplied subset (entries with an unknown base are dropped; the cycle
+ * falls back to the full base list when nothing valid remains).
  */
 export function getTestCycle(search = location.search) {
   const params = new URLSearchParams(search);
@@ -33,7 +74,10 @@ export function getTestCycle(search = location.search) {
   const raw = params.get("test") ?? "";
   if (!raw) return [...TEST_STATES];
   const requested = raw.split(",").map((s) => s.trim()).filter(Boolean);
-  const valid = requested.filter((s) => TEST_STATES.includes(s));
+  const valid = requested.filter((spec) => {
+    const { base } = parseStateSpec(spec);
+    return TEST_STATES.includes(base);
+  });
   return valid.length > 0 ? valid : [...TEST_STATES];
 }
 
@@ -129,10 +173,12 @@ function makeTestQueueEntry() {
 
 /**
  * Returns a shallow clone of `snap` with the test PR / queue entry layered
- * on top per `stateName`. Always present in `repos` + `defaultBranchByRepo`
- * so the ship card is around for the merge animation across all states.
+ * on top per `stateSpec`. `stateSpec` is `base[+mod1+mod2…]` — see
+ * `MODIFIERS` for the supported modifier names. Always present in `repos`
+ * + `defaultBranchByRepo` so the ship card is around for the merge
+ * animation across all states.
  */
-export function injectTestPr(snap, stateName) {
+export function injectTestPr(snap, stateSpec) {
   const out = {
     ...snap,
     prs: [...(snap.prs ?? [])],
@@ -149,48 +195,54 @@ export function injectTestPr(snap, stateName) {
     out.repos.push(TEST_REPO);
   }
 
-  switch (stateName) {
+  const { base, mods } = parseStateSpec(stateSpec);
+  let testPr = null;
+  let testQueueEntry = null;
+  switch (base) {
     case "passing":
-      out.prs.push(makeTestPr({ reviewDecision: "APPROVED", ciStatus: "success", isInMergeQueue: false }));
-      out.stacks.push({ rootKey: TEST_KEY, prKeys: [TEST_KEY] });
+      testPr = makeTestPr({ reviewDecision: "APPROVED", ciStatus: "success", isInMergeQueue: false });
       break;
     case "awaiting":
-      out.prs.push(makeTestPr({ reviewDecision: "REVIEW_REQUIRED", ciStatus: "success", isInMergeQueue: false }));
-      out.stacks.push({ rootKey: TEST_KEY, prKeys: [TEST_KEY] });
+      testPr = makeTestPr({ reviewDecision: "REVIEW_REQUIRED", ciStatus: "success", isInMergeQueue: false });
       break;
     case "failing":
-      out.prs.push(makeTestPr({ reviewDecision: "REVIEW_REQUIRED", ciStatus: "failed", isInMergeQueue: false }));
-      out.stacks.push({ rootKey: TEST_KEY, prKeys: [TEST_KEY] });
+      testPr = makeTestPr({ reviewDecision: "REVIEW_REQUIRED", ciStatus: "failed", isInMergeQueue: false });
       break;
     case "failing-partial":
       // Failed rollup, but some jobs are still running so the card should
       // be red AND show a live progress bar with the failures listed.
-      out.prs.push(makeTestPr({
+      testPr = makeTestPr({
         reviewDecision: "REVIEW_REQUIRED",
         ciStatus: "failed",
         isInMergeQueue: false,
         ciOptions: { partial: true },
-      }));
-      out.stacks.push({ rootKey: TEST_KEY, prKeys: [TEST_KEY] });
+      });
       break;
-    case "queued": {
+    case "queued":
       // PR stays in snap.prs with isInMergeQueue=true so the lifecycle
       // diff sees it transition to/from the queue and the slurp animation
       // fires when it disappears.
-      out.prs.push(makeTestPr({ reviewDecision: "APPROVED", ciStatus: "running", isInMergeQueue: true }));
-      out.stacks.push({ rootKey: TEST_KEY, prKeys: [TEST_KEY] });
-      let q = out.mergeQueues.find((q) => q.repo === TEST_REPO);
-      if (!q) {
-        q = { repo: TEST_REPO, entries: [] };
-        out.mergeQueues.push(q);
-      }
-      q.entries = [...q.entries, makeTestQueueEntry()];
+      testPr = makeTestPr({ reviewDecision: "APPROVED", ciStatus: "running", isInMergeQueue: true });
+      testQueueEntry = makeTestQueueEntry();
       break;
-    }
     case "merged":
       // Intentionally don't add the PR — the diff between queued and
       // merged drives the merge animation.
       break;
+  }
+
+  if (testPr) {
+    for (const m of mods) MODIFIERS[m](testPr);
+    out.prs.push(testPr);
+    out.stacks.push({ rootKey: TEST_KEY, prKeys: [TEST_KEY] });
+  }
+  if (testQueueEntry) {
+    let q = out.mergeQueues.find((q) => q.repo === TEST_REPO);
+    if (!q) {
+      q = { repo: TEST_REPO, entries: [] };
+      out.mergeQueues.push(q);
+    }
+    q.entries = [...q.entries, testQueueEntry];
   }
 
   return out;
