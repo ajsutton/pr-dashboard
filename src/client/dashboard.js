@@ -90,7 +90,13 @@ function fmtAge(ms) {
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m ${s % 60}s`;
   const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
+  if (h < 24) return `${h}h ${m % 60}m`;
+  const d = Math.floor(h / 24);
+  if (d < 7) return `${d}d ${h % 24}h`;
+  if (d < 60) return `~${d}d`;
+  const mo = Math.round(d / 30);
+  if (mo < 12) return `~${mo}mo`;
+  return `~${Math.round(mo / 12)}y`;
 }
 
 function ciTone(status) {
