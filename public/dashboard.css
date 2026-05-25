@@ -99,6 +99,7 @@ body { min-height: 100vh; font-size: 16px; }
 .db-conn { padding: 3px 10px; border-radius: 4px; font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
 .db-conn[data-state="connecting"] { background: var(--warn); color: var(--ink); }
 .db-conn[data-state="open"]       { background: var(--ok);   color: var(--ink); }
+.db-conn[data-state="stale"]      { background: var(--warn); color: var(--ink); }
 .db-conn[data-state="closed"]     { background: var(--err);  color: var(--ink); }
 .db-user::before { content: "@"; opacity: 0.5; }
 

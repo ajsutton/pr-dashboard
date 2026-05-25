@@ -78,9 +78,24 @@ function holdQueueRowOpen(repo) {
   lingerQueueTimers.set(repo, t);
 }
 
+let wsState = "connecting";
 function setConn(state) {
-  conn.dataset.state = state;
-  conn.textContent = state === "open" ? "live" : state === "closed" ? "offline" : "connecting…";
+  wsState = state;
+  applyConnState();
+}
+function applyConnState() {
+  let displayState = wsState;
+  if (wsState === "open" && isStale()) displayState = "stale";
+  conn.dataset.state = displayState;
+  conn.textContent =
+    displayState === "open" ? "live"
+    : displayState === "stale" ? "stale"
+    : displayState === "closed" ? "offline"
+    : "connecting…";
+}
+function isStale() {
+  if (!latest?.generatedAt) return false;
+  return Date.now() - Date.parse(latest.generatedAt) > 2 * 60 * 1000;
 }
 
 function fmtAge(ms) {
@@ -1064,10 +1079,16 @@ function clearLifecycleClasses() {
 function updateTimestamp() {
   if (!latest?.generatedAt) {
     updatedEl.textContent = "";
+    applyConnState();
     return;
   }
   const age = Date.now() - Date.parse(latest.generatedAt);
-  updatedEl.textContent = `updated ${fmtAge(age)} ago`;
+  if (age <= 2 * 60 * 1000) {
+    updatedEl.textContent = "";
+  } else {
+    updatedEl.textContent = `updated ${fmtAge(age)} ago`;
+  }
+  applyConnState();
 }
 
 function escapeHtml(s) {
