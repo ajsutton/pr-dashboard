@@ -97,11 +97,12 @@ export interface ViewerWorkload {
   reviewRequestedPrs: RawReviewRequestItem[];
   reviewRequestedPrsTotalCount: number;
   /**
-   * Count from a `user-review-requested:@me` search — only PRs where the
-   * viewer's own login is requested, not any team they belong to. Lets the
-   * "Personal Review Requests" card show an accurate total even when the
-   * nodes list (capped at 100) misses some entries.
+   * Items from a `user-review-requested:@me` search — only PRs where the
+   * viewer's own login is requested, not any team they belong to. Capped
+   * at 100 by the GraphQL search-node limit; the true count is in
+   * `personalReviewRequestsTotalCount`.
    */
+  personalReviewRequestedPrs: RawStatItem[];
   personalReviewRequestsTotalCount: number;
 }
 
@@ -454,7 +455,7 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
             }
           }
         }
-        assignedIssues: search(query: "assignee:@me is:issue is:open", first: 100, type: ISSUE) {
+        assignedIssues: search(query: "assignee:@me is:issue is:open archived:false", first: 100, type: ISSUE) {
           issueCount
           nodes {
             ... on Issue {
@@ -467,7 +468,7 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
             }
           }
         }
-        reviewRequestedPrs: search(query: "review-requested:@me is:pr is:open", first: 100, type: ISSUE) {
+        reviewRequestedPrs: search(query: "review-requested:@me is:pr is:open archived:false", first: 100, type: ISSUE) {
           issueCount
           nodes {
             ... on PullRequest {
@@ -489,8 +490,18 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
             }
           }
         }
-        personalReviewRequests: search(query: "user-review-requested:@me is:pr is:open", first: 1, type: ISSUE) {
+        personalReviewRequests: search(query: "user-review-requested:@me is:pr is:open archived:false", first: 100, type: ISSUE) {
           issueCount
+          nodes {
+            ... on PullRequest {
+              number
+              title
+              url
+              createdAt
+              updatedAt
+              repository { nameWithOwner }
+            }
+          }
         }
       }
     `;
@@ -541,10 +552,18 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
       typeof reviewReqNode["issueCount"] === "number" ? (reviewReqNode["issueCount"] as number) : reviewRequestedPrs.length;
 
     const personalReviewNode = (data?.["personalReviewRequests"] as Record<string, unknown> | undefined) ?? {};
+    const personalReviewRequestedPrs: RawStatItem[] = [];
+    const personalNodes = personalReviewNode["nodes"];
+    if (Array.isArray(personalNodes)) {
+      for (const n of personalNodes) {
+        const parsed = parseStatItemNode(n);
+        if (parsed) personalReviewRequestedPrs.push(parsed);
+      }
+    }
     const personalReviewRequestsTotalCount =
       typeof personalReviewNode["issueCount"] === "number"
         ? (personalReviewNode["issueCount"] as number)
-        : reviewRequestedPrs.filter((r) => r.reviewerLogins.length > 0).length;
+        : personalReviewRequestedPrs.length;
 
     return {
       prs: raws,
@@ -552,6 +571,7 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
       assignedIssuesTotalCount,
       reviewRequestedPrs,
       reviewRequestedPrsTotalCount,
+      personalReviewRequestedPrs,
       personalReviewRequestsTotalCount,
     };
   }

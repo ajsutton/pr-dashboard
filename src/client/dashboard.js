@@ -30,10 +30,12 @@ const jobsEl = document.getElementById("db-jobs");
 const stacksEl = document.getElementById("db-stacks");
 const statsEl = document.getElementById("db-stats");
 
-// ID of the currently flipped stat card, or null if none. Survives across
-// re-renders so a snapshot arriving while a card is open doesn't snap it
-// shut. Only one card is open at a time.
-let flippedStatId = null;
+// ID of the currently open stat overlay, or null. Survives re-renders so a
+// snapshot arriving while the overlay is open doesn't close it. Only one
+// overlay is open at a time.
+let openStatId = null;
+let overlayEl = null;
+let backdropEl = null;
 
 let latest = null;
 let updatedTicker = null;
@@ -291,13 +293,15 @@ function renderStatTable(card) {
       .sort((a, b) => Date.parse(b.createdAt || "") - Date.parse(a.createdAt || ""))
       .map(renderStatItemRow)
       .join("");
+    const trunc = Number.isFinite(card.count) && card.items.length < card.count
+      ? `<div class="db-stat-table-trunc">Showing first ${card.items.length} of ${card.count}.</div>`
+      : "";
     return `
-      <div class="db-stat-table-wrap">
-        <table class="db-stat-table">
-          <thead><tr><th>#</th><th>Title</th><th>Opened</th><th>Updated</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
+      <table class="db-stat-table">
+        <thead><tr><th>#</th><th>Title</th><th>Opened</th><th>Updated</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      ${trunc}
     `;
   }
   if (!card.items.length) {
@@ -305,35 +309,24 @@ function renderStatTable(card) {
   }
   const rows = card.items.map(renderStatTotalRow).join("");
   return `
-    <div class="db-stat-table-wrap">
-      <table class="db-stat-table">
-        <thead><tr><th>Project</th><th class="db-stat-table-count">Count</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>
+    <table class="db-stat-table">
+      <thead><tr><th>Project</th><th class="db-stat-table-count">Count</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
   `;
 }
 
 function renderStatCard(card) {
-  const flipped = card.id === flippedStatId;
   const countText = Number.isFinite(card.count) ? String(card.count) : "—";
   return `
-    <button class="db-stat-card" type="button" data-stat-id="${escapeAttr(card.id)}" data-flipped="${flipped}" aria-expanded="${flipped}">
-      <div class="db-stat-face db-stat-front">
-        <span class="db-stat-count">${escapeHtml(countText)}</span>
-        <span class="db-stat-label">${escapeHtml(card.label)}</span>
-      </div>
-      <div class="db-stat-face db-stat-back">
-        <div class="db-stat-back-header">
-          <span class="db-stat-back-title">${escapeHtml(card.label)} · ${card.count}</span>
-          <span class="db-stat-back-close" data-stat-close="1">Close</span>
-        </div>
-        ${renderStatTable(card)}
-      </div>
+    <button class="db-stat-card" type="button" data-stat-id="${escapeAttr(card.id)}" aria-haspopup="dialog">
+      <span class="db-stat-count">${escapeHtml(countText)}</span>
+      <span class="db-stat-label">${escapeHtml(card.label)}</span>
     </button>
   `;
 }
 
+let latestStatCards = [];
 function renderStats(snap) {
   if (!statsEl) return;
   const stats = snap.stats ?? {
@@ -342,28 +335,155 @@ function renderStats(snap) {
     totalIssuesByRepo: [],
     totalPrsByRepo: [],
   };
-  const cards = buildStatCards(stats);
-  // If the previously flipped card no longer exists for any reason, clear
-  // the flipped state so the container doesn't stay locked in expanded mode.
-  if (flippedStatId && !cards.some((c) => c.id === flippedStatId)) {
-    flippedStatId = null;
+  latestStatCards = buildStatCards(stats);
+  statsEl.innerHTML = latestStatCards.map(renderStatCard).join("");
+  // Keep the overlay in sync when fresh data arrives.
+  if (openStatId) refreshOpenOverlay();
+}
+
+function findStatCard(id) {
+  return latestStatCards.find((c) => c.id === id) ?? null;
+}
+
+/**
+ * Compute the centred target rect for the overlay panel. Caps at a
+ * comfortable maximum and falls back gracefully on narrow viewports.
+ */
+function overlayTargetRect() {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const w = Math.min(900, Math.round(vw * 0.92));
+  const h = Math.min(620, Math.round(vh * 0.84));
+  return {
+    left: Math.round((vw - w) / 2),
+    top: Math.round((vh - h) / 2),
+    width: w,
+    height: h,
+  };
+}
+
+function openStatOverlay(card, sourceEl) {
+  closeStatOverlay(/* skipAnim */ true);
+  openStatId = card.id;
+
+  const src = sourceEl.getBoundingClientRect();
+
+  backdropEl = document.createElement("div");
+  backdropEl.className = "db-stat-backdrop";
+  backdropEl.addEventListener("click", () => closeStatOverlay());
+  document.body.appendChild(backdropEl);
+
+  overlayEl = document.createElement("div");
+  overlayEl.className = "db-stat-overlay";
+  overlayEl.dataset.statId = card.id;
+  overlayEl.setAttribute("role", "dialog");
+  overlayEl.setAttribute("aria-label", card.label);
+  overlayEl.innerHTML = overlayInnerHtml(card);
+  // Start at the source card's rect so the panel visibly grows out of it.
+  overlayEl.style.left = `${src.left}px`;
+  overlayEl.style.top = `${src.top}px`;
+  overlayEl.style.width = `${src.width}px`;
+  overlayEl.style.height = `${src.height}px`;
+  document.body.appendChild(overlayEl);
+
+  overlayEl.querySelector(".db-stat-overlay-close")?.addEventListener("click", () => closeStatOverlay());
+
+  // Force a layout, then transition to the centred rect + flip the inner
+  // flipper to reveal the back face.
+  void overlayEl.offsetWidth;
+  requestAnimationFrame(() => {
+    backdropEl?.setAttribute("data-open", "true");
+    if (!overlayEl) return;
+    const t = overlayTargetRect();
+    overlayEl.style.left = `${t.left}px`;
+    overlayEl.style.top = `${t.top}px`;
+    overlayEl.style.width = `${t.width}px`;
+    overlayEl.style.height = `${t.height}px`;
+    overlayEl.dataset.open = "true";
+  });
+}
+
+function closeStatOverlay(skipAnim) {
+  if (!overlayEl) {
+    openStatId = null;
+    return;
   }
-  statsEl.dataset.anyFlipped = flippedStatId ? "true" : "false";
-  statsEl.innerHTML = cards.map(renderStatCard).join("");
+  const ov = overlayEl;
+  const bd = backdropEl;
+  const id = openStatId;
+  overlayEl = null;
+  backdropEl = null;
+  openStatId = null;
+
+  if (skipAnim) {
+    ov.remove();
+    bd?.remove();
+    return;
+  }
+
+  // Animate back to the source rect if it's still on screen, else fade out.
+  const sourceEl = id ? document.querySelector(`.db-stat-card[data-stat-id="${cssEscapeAttr(id)}"]`) : null;
+  bd?.removeAttribute("data-open");
+  ov.removeAttribute("data-open"); // unflip
+  if (sourceEl) {
+    const src = sourceEl.getBoundingClientRect();
+    ov.style.left = `${src.left}px`;
+    ov.style.top = `${src.top}px`;
+    ov.style.width = `${src.width}px`;
+    ov.style.height = `${src.height}px`;
+  } else {
+    ov.style.transition = "opacity 220ms ease";
+    ov.style.opacity = "0";
+  }
+  setTimeout(() => {
+    ov.remove();
+    bd?.remove();
+  }, 560);
+}
+
+function refreshOpenOverlay() {
+  if (!overlayEl || !openStatId) return;
+  const card = findStatCard(openStatId);
+  if (!card) {
+    closeStatOverlay();
+    return;
+  }
+  overlayEl.innerHTML = overlayInnerHtml(card);
+  overlayEl.querySelector(".db-stat-overlay-close")?.addEventListener("click", () => closeStatOverlay());
+}
+
+function overlayInnerHtml(card) {
+  const countText = Number.isFinite(card.count) ? String(card.count) : "—";
+  return `
+    <div class="db-stat-overlay-flipper">
+      <div class="db-stat-overlay-face db-stat-overlay-face-front">
+        <span class="db-stat-count">${escapeHtml(countText)}</span>
+        <span class="db-stat-label">${escapeHtml(card.label)}</span>
+      </div>
+      <div class="db-stat-overlay-face db-stat-overlay-face-back">
+        <header class="db-stat-overlay-head">
+          <span class="db-stat-overlay-count">${escapeHtml(countText)}</span>
+          <span class="db-stat-overlay-label">${escapeHtml(card.label)}</span>
+          <button class="db-stat-overlay-close" type="button" aria-label="Close">×</button>
+        </header>
+        <div class="db-stat-overlay-body">${renderStatTable(card)}</div>
+      </div>
+    </div>
+  `;
 }
 
 statsEl?.addEventListener("click", (ev) => {
-  const card = ev.target.closest(".db-stat-card");
-  if (!card) return;
-  const id = card.dataset.statId;
+  const cardEl = ev.target.closest(".db-stat-card");
+  if (!cardEl) return;
+  const id = cardEl.dataset.statId;
   if (!id) return;
-  // Anchor / link inside the back face should follow the link, not toggle.
-  if (ev.target.closest("a")) return;
-  const closing = card.dataset.flipped === "true";
-  flippedStatId = closing ? null : id;
-  // Re-render so the previously open card collapses and the new one opens.
-  const snap = effectiveSnapshot();
-  if (snap) renderStats(snap);
+  const card = findStatCard(id);
+  if (!card) return;
+  openStatOverlay(card, cardEl);
+});
+
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && openStatId) closeStatOverlay();
 });
 
 function renderStacks(snap) {

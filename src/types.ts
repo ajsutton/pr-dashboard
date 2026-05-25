@@ -133,6 +133,11 @@ export interface DashboardStats {
   reviewRequests: ReviewRequestItem[];
   /** True total of review-requested PRs (personal + team). */
   reviewRequestsTotalCount: number;
+  /**
+   * PRs where the viewer's own login is requested (not via a team). Capped
+   * at 100 nodes; use `personalReviewRequestsTotalCount` for the real total.
+   */
+  personalReviewRequests: StatItem[];
   /** True total of PRs where the viewer specifically (not a team) is requested. */
   personalReviewRequestsTotalCount: number;
   totalIssuesByRepo: RepoCount[];

@@ -9,7 +9,7 @@
 export function buildStatCards(stats) {
   const assignedIssues = stats.assignedIssues ?? [];
   const reviewRequests = stats.reviewRequests ?? [];
-  const personal = reviewRequests.filter((r) => r.isPersonal);
+  const personal = stats.personalReviewRequests ?? [];
   const issueTotals = stats.totalIssuesByRepo ?? [];
   const prTotals = stats.totalPrsByRepo ?? [];
   // Prefer the server-provided totals when available — search.nodes is

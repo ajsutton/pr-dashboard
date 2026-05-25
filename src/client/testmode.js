@@ -263,6 +263,7 @@ export function emptyTestSnapshot() {
       assignedIssuesTotalCount: 0,
       reviewRequests: [],
       reviewRequestsTotalCount: 0,
+      personalReviewRequests: [],
       personalReviewRequestsTotalCount: 0,
       totalIssuesByRepo: [],
       totalPrsByRepo: [],

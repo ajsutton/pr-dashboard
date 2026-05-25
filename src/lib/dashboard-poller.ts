@@ -192,6 +192,7 @@ export class DashboardPoller {
         assignedIssuesTotalCount: workload.assignedIssuesTotalCount,
         reviewRequestedPrs: workload.reviewRequestedPrs,
         reviewRequestedPrsTotalCount: workload.reviewRequestedPrsTotalCount,
+        personalReviewRequestedPrs: workload.personalReviewRequestedPrs,
         personalReviewRequestsTotalCount: workload.personalReviewRequestsTotalCount,
         orderedRepos: this.repos,
         repoMeta: canonicalMeta,
@@ -583,6 +584,7 @@ export function emptyStats(): DashboardStats {
     assignedIssuesTotalCount: 0,
     reviewRequests: [],
     reviewRequestsTotalCount: 0,
+    personalReviewRequests: [],
     personalReviewRequestsTotalCount: 0,
     totalIssuesByRepo: [],
     totalPrsByRepo: [],
@@ -629,6 +631,7 @@ interface BuildStatsArgs {
   assignedIssuesTotalCount: number;
   reviewRequestedPrs: RawReviewRequestItem[];
   reviewRequestedPrsTotalCount: number;
+  personalReviewRequestedPrs: RawStatItem[];
   personalReviewRequestsTotalCount: number;
   orderedRepos: string[];
   repoMeta: Map<string, RepoMeta>;
@@ -654,11 +657,20 @@ export function buildStats(args: BuildStatsArgs): DashboardStats {
     updatedAt: p.updatedAt,
     isPersonal: !!args.viewerLogin && p.reviewerLogins.includes(args.viewerLogin),
   }));
+  const personalReviewRequests: StatItem[] = args.personalReviewRequestedPrs.map((p) => ({
+    repo: p.repo,
+    number: p.number,
+    title: p.title,
+    url: p.url,
+    createdAt: p.createdAt,
+    updatedAt: p.updatedAt,
+  }));
   return {
     assignedIssues,
     assignedIssuesTotalCount: args.assignedIssuesTotalCount,
     reviewRequests,
     reviewRequestsTotalCount: args.reviewRequestedPrsTotalCount,
+    personalReviewRequests,
     personalReviewRequestsTotalCount: args.personalReviewRequestsTotalCount,
     totalIssuesByRepo: buildTotalsByRepo(args.orderedRepos, args.repoMeta, "issues", args.ghOrigin),
     totalPrsByRepo: buildTotalsByRepo(args.orderedRepos, args.repoMeta, "prs", args.ghOrigin),

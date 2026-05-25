@@ -123,6 +123,7 @@ describe("buildStats", () => {
     assignedIssuesTotalCount: 0,
     reviewRequestedPrs: [] as RawReviewRequestItem[],
     reviewRequestedPrsTotalCount: 0,
+    personalReviewRequestedPrs: [] as RawStatItem[],
     personalReviewRequestsTotalCount: 0,
     orderedRepos: [] as string[],
     repoMeta: new Map<string, RepoMeta>(),
@@ -186,5 +187,30 @@ describe("buildStats", () => {
     expect(stats.assignedIssuesTotalCount).toBe(137);
     expect(stats.reviewRequestsTotalCount).toBe(215);
     expect(stats.personalReviewRequestsTotalCount).toBe(4);
+  });
+
+  test("personalReviewRequests comes from the dedicated user-review-requested search, not filtered from the group list", () => {
+    // Before this fix, the personal-reviews detail filtered the group list
+    // (capped at 100), so personal items outside the first 100 group
+    // results disappeared from the table even though the count was right.
+    const personalA: RawStatItem = {
+      repo: "o/r", number: 11, title: "personal A",
+      url: "https://github.com/o/r/pull/11",
+      createdAt: "2026-05-01T00:00:00Z",
+      updatedAt: "2026-05-02T00:00:00Z",
+    };
+    const personalB: RawStatItem = {
+      repo: "o/r", number: 22, title: "personal B (not in group list)",
+      url: "https://github.com/o/r/pull/22",
+      createdAt: "2026-04-30T00:00:00Z",
+      updatedAt: "2026-05-01T00:00:00Z",
+    };
+    const stats = buildStats({
+      ...baseArgs,
+      reviewRequestedPrs: [reviewReq({ number: 99, reviewerLogins: [] })],
+      personalReviewRequestedPrs: [personalA, personalB],
+      personalReviewRequestsTotalCount: 2,
+    });
+    expect(stats.personalReviewRequests.map((p) => p.number)).toEqual([11, 22]);
   });
 });

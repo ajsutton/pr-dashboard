@@ -38,20 +38,21 @@ describe('buildStatCards', () => {
     expect(cards.find((c) => c.id === 'assigned-issues').count).toBe(3);
   });
 
-  it('counts personal review requests as only the personal-flagged subset', () => {
+  it('uses stats.personalReviewRequests for the personal-reviews card items (not filtered from the group list)', () => {
     const cards = buildStatCards({
       assignedIssues: [],
-      reviewRequests: [
-        { ...item({ number: 1 }), isPersonal: true },
-        { ...item({ number: 2 }), isPersonal: false },
-        { ...item({ number: 3 }), isPersonal: true },
+      reviewRequests: [item({ number: 99 })], // group list, irrelevant for personal card
+      personalReviewRequests: [
+        item({ number: 11 }),
+        item({ number: 22 }),
       ],
+      personalReviewRequestsTotalCount: 2,
       totalIssuesByRepo: [],
       totalPrsByRepo: [],
     });
     const personal = cards.find((c) => c.id === 'personal-reviews');
     expect(personal.count).toBe(2);
-    expect(personal.items.map((r) => r.number)).toEqual([1, 3]);
+    expect(personal.items.map((r) => r.number)).toEqual([11, 22]);
   });
 
   it('counts all review requests (personal + group) for the Review Requests card', () => {
