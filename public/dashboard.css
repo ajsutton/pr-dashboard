@@ -94,7 +94,15 @@ body { min-height: 100vh; font-size: 16px; }
   color: #ffffff;
   font-size: 12px;
   pointer-events: none;
+  /* Pull the pill into its own view-transition group so it isn't dragged
+   * through the root cross-fade on every snapshot. Without this, the
+   * old/new root snapshots both contain the pill but composite to ~75%
+   * opacity mid-fade, producing a periodic flicker. plus-lighter sums the
+   * two snapshot opacities to a constant 1 so the pill stays solid. */
+  view-transition-name: db-meta;
 }
+::view-transition-old(db-meta),
+::view-transition-new(db-meta) { mix-blend-mode: plus-lighter; }
 .db-meta > * { pointer-events: auto; }
 .db-conn { padding: 3px 10px; border-radius: 4px; font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
 .db-conn[data-state="connecting"] { background: var(--warn); color: var(--ink); }
