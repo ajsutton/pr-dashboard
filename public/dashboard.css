@@ -140,7 +140,7 @@ body { min-height: 100vh; font-size: 16px; }
   border: none;
   border-radius: 8px;
   padding: 14px 16px;
-  background: var(--neutral);
+  background: var(--stacked);
   color: var(--ink);
   font: inherit;
   cursor: pointer;
@@ -155,11 +155,6 @@ body { min-height: 100vh; font-size: 16px; }
 }
 .db-stat-card:hover { transform: translateY(-2px); filter: brightness(1.04); }
 .db-stat-card:active { transform: translateY(0); }
-.db-stat-card[data-stat-id="assigned-issues"]  { background: var(--err); }
-.db-stat-card[data-stat-id="personal-reviews"] { background: var(--warn); }
-.db-stat-card[data-stat-id="review-requests"]  { background: var(--queue); }
-.db-stat-card[data-stat-id="open-issues"]      { background: var(--stacked); }
-.db-stat-card[data-stat-id="open-prs"]         { background: var(--ok); }
 
 .db-stat-count {
   font-size: 48px;
@@ -243,12 +238,8 @@ body { min-height: 100vh; font-size: 16px; }
   gap: 8px;
   padding: 14px 16px;
   color: var(--ink);
+  background: var(--stacked);
 }
-.db-stat-overlay[data-stat-id="assigned-issues"]  .db-stat-overlay-face-front { background: var(--err); }
-.db-stat-overlay[data-stat-id="personal-reviews"] .db-stat-overlay-face-front { background: var(--warn); }
-.db-stat-overlay[data-stat-id="review-requests"]  .db-stat-overlay-face-front { background: var(--queue); }
-.db-stat-overlay[data-stat-id="open-issues"]      .db-stat-overlay-face-front { background: var(--stacked); }
-.db-stat-overlay[data-stat-id="open-prs"]         .db-stat-overlay-face-front { background: var(--ok); }
 .db-stat-overlay-face-front .db-stat-count {
   font-size: 48px;
   font-weight: 800;
@@ -269,12 +260,8 @@ body { min-height: 100vh; font-size: 16px; }
 .db-stat-overlay-face-back {
   transform: rotateY(180deg);
   color: var(--ink);
+  background: var(--stacked);
 }
-.db-stat-overlay[data-stat-id="assigned-issues"]  .db-stat-overlay-face-back { background: var(--err); }
-.db-stat-overlay[data-stat-id="personal-reviews"] .db-stat-overlay-face-back { background: var(--warn); }
-.db-stat-overlay[data-stat-id="review-requests"]  .db-stat-overlay-face-back { background: var(--queue); }
-.db-stat-overlay[data-stat-id="open-issues"]      .db-stat-overlay-face-back { background: var(--stacked); }
-.db-stat-overlay[data-stat-id="open-prs"]         .db-stat-overlay-face-back { background: var(--ok); }
 
 .db-stat-overlay-head {
   display: flex;
