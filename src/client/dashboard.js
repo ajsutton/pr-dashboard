@@ -1046,7 +1046,14 @@ function render() {
   // flight — visually reading as a second, "slightly quicker" slurp on top
   // of the actual one. Bypassing the transition lets the clone animate
   // cleanly from queue position to ship.
-  const wantViewTransition = document.startViewTransition && hadContent && slurps.length === 0;
+  //
+  // Also skip while the stat overlay is open. PR/queue/job cards carry
+  // inline view-transition-names, so during a transition they become
+  // ::view-transition-group pseudo-elements stacked above the transition
+  // root. The overlay has no view-transition-name and is captured into the
+  // root snapshot, so the cards visibly pop above the overlay for the
+  // duration of the transition.
+  const wantViewTransition = document.startViewTransition && hadContent && slurps.length === 0 && !openStatId;
   if (wantViewTransition) {
     const t = document.startViewTransition(doRender);
     t.ready.finally(() => {
