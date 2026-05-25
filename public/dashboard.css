@@ -118,6 +118,173 @@ body { min-height: 100vh; font-size: 16px; }
   color: var(--fg-mute);
 }
 
+/* ============================== Stats row ============================== */
+/*
+ * Five distance-readable stat cards. Front face shows a large count plus a
+ * label; clicking flips the card 180° on the Y axis and expands it across
+ * the full row to reveal a scrollable detail table. While any card is open,
+ * the other four collapse out of the flow so the open card has the row to
+ * itself.
+ */
+.db-stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  perspective: 1200px;
+}
+@media (max-width: 900px) {
+  .db-stats { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+}
+.db-stats[data-any-flipped="true"] .db-stat-card[data-flipped="false"] {
+  display: none;
+}
+
+.db-stat-card {
+  position: relative;
+  min-height: 110px;
+  border: none;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transform-style: preserve-3d;
+  transition: transform 450ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.db-stat-card[data-flipped="true"] {
+  grid-column: 1 / -1;
+  min-height: 240px;
+  transform: rotateY(180deg);
+  cursor: default;
+}
+
+.db-stat-face {
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+  background: var(--neutral);
+  color: var(--ink);
+  padding: 14px 16px;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.4);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.db-stat-front { gap: 6px; align-items: flex-start; justify-content: center; }
+.db-stat-back {
+  transform: rotateY(180deg);
+  padding: 12px 14px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.db-stat-card[data-flipped="false"] .db-stat-back { pointer-events: none; }
+.db-stat-card[data-flipped="true"] .db-stat-front { pointer-events: none; }
+
+.db-stat-count {
+  font-size: 48px;
+  font-weight: 800;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.db-stat-label {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(10, 10, 10, 0.7);
+}
+
+.db-stat-back-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 8px;
+  gap: 12px;
+}
+.db-stat-back-title {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+.db-stat-back-close {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.db-stat-back-close:hover { color: var(--fg); border-color: var(--fg-dim); }
+
+.db-stat-table-wrap {
+  max-height: 50vh;
+  overflow-y: auto;
+  border-radius: 4px;
+}
+.db-stat-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.db-stat-table th,
+.db-stat-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.db-stat-table th {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+}
+.db-stat-table td.db-stat-table-num,
+.db-stat-table td.db-stat-table-age {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.db-stat-table td.db-stat-table-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  text-align: right;
+}
+.db-stat-table a { color: var(--fg); text-decoration: none; }
+.db-stat-table a:hover { text-decoration: underline; }
+.db-stat-table-empty {
+  padding: 12px 4px;
+  color: var(--fg-mute);
+  font-size: 13px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .db-stat-card { transition: none; }
+}
+
+@media (min-width: 1600px) {
+  .db-stat-count { font-size: 60px; }
+}
+@media (min-width: 2200px) {
+  .db-stat-count { font-size: 80px; }
+  .db-stat-label { font-size: 14px; }
+}
+
 /* ============================== PR cards ============================== */
 /*
  * Stacks no longer have their own container — all PRs are direct grid items

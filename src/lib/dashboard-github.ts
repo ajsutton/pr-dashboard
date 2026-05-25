@@ -70,16 +70,71 @@ export interface RawWorkflowRun {
   runId: number;
 }
 
+/**
+ * Per-repo metadata fetched alongside canonical-name resolution. Open issue +
+ * PR counts are surfaced in the dashboard's totals cards.
+ */
+export interface RepoMeta {
+  /** Canonical `owner/name` GitHub currently reports for this repo. */
+  canonical: string;
+  openIssues: number;
+  openPrs: number;
+}
+
+/**
+ * What the viewer query returns. PRs the viewer authored, plus the two
+ * workload search results (issues assigned to the viewer + PRs where the
+ * viewer or one of their teams is a requested reviewer).
+ *
+ * `*TotalCount` come from `search.issueCount` and reflect the true total —
+ * `nodes` is capped at 100 by the GraphQL API, so the count on the stats
+ * cards must use these rather than `nodes.length`.
+ */
+export interface ViewerWorkload {
+  prs: RawPr[];
+  assignedIssues: RawStatItem[];
+  assignedIssuesTotalCount: number;
+  reviewRequestedPrs: RawReviewRequestItem[];
+  reviewRequestedPrsTotalCount: number;
+  /**
+   * Count from a `user-review-requested:@me` search — only PRs where the
+   * viewer's own login is requested, not any team they belong to. Lets the
+   * "Personal Review Requests" card show an accurate total even when the
+   * nodes list (capped at 100) misses some entries.
+   */
+  personalReviewRequestsTotalCount: number;
+}
+
+export interface RawStatItem {
+  repo: string;
+  number: number;
+  title: string;
+  url: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RawReviewRequestItem extends RawStatItem {
+  /** Logins of requested User reviewers. Used to derive isPersonal. */
+  reviewerLogins: string[];
+}
+
 export interface DashboardGitHubClient {
   fetchViewer(): Promise<{ login: string }>;
-  fetchMyOpenPrs(): Promise<RawPr[]>;
+  /**
+   * One GraphQL request that returns PRs the viewer authored plus the two
+   * search-based workload feeds (assigned issues + review-requested PRs).
+   * Folding all three into a single round-trip keeps refresh latency tight.
+   */
+  fetchViewerWorkload(): Promise<ViewerWorkload>;
   /**
    * Resolve each `owner/name` through GitHub to its current canonical
-   * `nameWithOwner`. Transferred/renamed repos resolve to their new name; the
-   * map is keyed by the input and is the caller's responsibility to apply.
-   * Repos GitHub can't find (deleted, no access) map back to themselves.
+   * `nameWithOwner`, plus per-repo open issue / PR counts used by the
+   * dashboard's totals cards. Transferred/renamed repos resolve to their new
+   * name; the map is keyed by the input. Repos GitHub can't find (deleted,
+   * no access) map back to `{ canonical: input, openIssues: 0, openPrs: 0 }`.
    */
-  resolveCanonicalRepoNames(repos: string[]): Promise<Map<string, string>>;
+  resolveRepoMeta(repos: string[]): Promise<Map<string, RepoMeta>>;
   fetchMergeQueue(repo: string): Promise<RawMergeQueueEntry[]>;
   fetchDefaultBranchHead(repo: string): Promise<{ branch: string; sha: string; checks: RawCheckContext[] } | undefined>;
   /**
@@ -205,6 +260,72 @@ function extractContextsFollowup(
   return { owner, name, oid, cursor };
 }
 
+/**
+ * Parse a single aliased `repository(...)` response node into a RepoMeta.
+ * Null/missing nodes (deleted, no access) fall back to the input name with
+ * zero counts. Exported for unit tests.
+ */
+export function parseRepoMetaNode(node: unknown, fallbackRepo: string): RepoMeta {
+  if (!node || typeof node !== "object") {
+    return { canonical: fallbackRepo, openIssues: 0, openPrs: 0 };
+  }
+  const o = node as Record<string, unknown>;
+  const canonical = (o["nameWithOwner"] as string | undefined) ?? fallbackRepo;
+  const oi = (o["openIssues"] as Record<string, unknown> | undefined)?.["totalCount"];
+  const op = (o["openPrs"] as Record<string, unknown> | undefined)?.["totalCount"];
+  return {
+    canonical,
+    openIssues: typeof oi === "number" ? oi : 0,
+    openPrs: typeof op === "number" ? op : 0,
+  };
+}
+
+/**
+ * Parse one `search.nodes[*]` item under `... on Issue` into a RawStatItem.
+ * Missing fields return empty strings / 0 so the caller can render `—`
+ * rather than crashing.
+ */
+export function parseStatItemNode(node: unknown): RawStatItem | undefined {
+  if (!node || typeof node !== "object") return undefined;
+  const o = node as Record<string, unknown>;
+  const repo = ((o["repository"] as Record<string, unknown> | undefined)?.["nameWithOwner"] as string) ?? "";
+  const number = (o["number"] as number) ?? 0;
+  if (!repo || !number) return undefined;
+  return {
+    repo,
+    number,
+    title: (o["title"] as string) ?? "",
+    url: (o["url"] as string) ?? "",
+    createdAt: (o["createdAt"] as string) ?? "",
+    updatedAt: (o["updatedAt"] as string) ?? "",
+  };
+}
+
+/**
+ * Parse one `search.nodes[*]` item under `... on PullRequest` into a
+ * RawReviewRequestItem. The reviewerLogins array captures every requested
+ * `User`-typed reviewer; callers compare against the viewer's login to set
+ * the personal flag.
+ */
+export function parseReviewRequestNode(node: unknown): RawReviewRequestItem | undefined {
+  const base = parseStatItemNode(node);
+  if (!base) return undefined;
+  const o = node as Record<string, unknown>;
+  const reqs = (o["reviewRequests"] as Record<string, unknown> | undefined)?.["nodes"];
+  const reviewerLogins: string[] = [];
+  if (Array.isArray(reqs)) {
+    for (const r of reqs) {
+      const rev = (r as Record<string, unknown>)?.["requestedReviewer"] as Record<string, unknown> | undefined;
+      if (!rev) continue;
+      if (rev["__typename"] === "User") {
+        const login = rev["login"] as string | undefined;
+        if (login) reviewerLogins.push(login);
+      }
+    }
+  }
+  return { ...base, reviewerLogins };
+}
+
 function parseContexts(nodes: unknown): RawCheckContext[] {
   if (!Array.isArray(nodes)) return [];
   return nodes.map((n) => {
@@ -235,18 +356,20 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
     return { login };
   }
 
-  async resolveCanonicalRepoNames(repos: string[]): Promise<Map<string, string>> {
-    const out = new Map<string, string>();
+  async resolveRepoMeta(repos: string[]): Promise<Map<string, RepoMeta>> {
+    const out = new Map<string, RepoMeta>();
     if (repos.length === 0) return out;
     // Batch into a single GraphQL request using aliased `repository(...)`
-    // selections. Cheaper than N round-trips through `gh api`.
+    // selections. Cheaper than N round-trips through `gh api`. Each selection
+    // also pulls the open-issue + open-PR count so the totals cards don't
+    // need separate searches.
     const fields: string[] = [];
     const inputs: { alias: string; repo: string; owner: string; name: string }[] = [];
     for (let i = 0; i < repos.length; i++) {
       const repo = repos[i]!;
       const slash = repo.indexOf("/");
       if (slash <= 0 || slash === repo.length - 1) {
-        out.set(repo, repo);
+        out.set(repo, { canonical: repo, openIssues: 0, openPrs: 0 });
         continue;
       }
       const owner = repo.slice(0, slash);
@@ -255,20 +378,25 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
       // GraphQL string-literal escape — repo names contain only alnum/-/_/. but
       // be safe in case GitHub ever broadens that.
       const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-      fields.push(`${alias}: repository(owner: "${esc(owner)}", name: "${esc(name)}") { nameWithOwner }`);
+      fields.push(
+        `${alias}: repository(owner: "${esc(owner)}", name: "${esc(name)}") {
+          nameWithOwner
+          openIssues: issues(states: OPEN) { totalCount }
+          openPrs: pullRequests(states: OPEN) { totalCount }
+        }`,
+      );
       inputs.push({ alias, repo, owner, name });
     }
     if (fields.length === 0) return out;
     const query = `query { ${fields.join(" ")} }`;
     const data = await ghGraphql(query);
     for (const { alias, repo } of inputs) {
-      const node = data?.[alias] as { nameWithOwner?: string } | null | undefined;
-      out.set(repo, node?.nameWithOwner ?? repo);
+      out.set(repo, parseRepoMetaNode(data?.[alias], repo));
     }
     return out;
   }
 
-  async fetchMyOpenPrs(): Promise<RawPr[]> {
+  async fetchViewerWorkload(): Promise<ViewerWorkload> {
     const query = `
       query {
         viewer {
@@ -326,12 +454,50 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
             }
           }
         }
+        assignedIssues: search(query: "assignee:@me is:issue is:open", first: 100, type: ISSUE) {
+          issueCount
+          nodes {
+            ... on Issue {
+              number
+              title
+              url
+              createdAt
+              updatedAt
+              repository { nameWithOwner }
+            }
+          }
+        }
+        reviewRequestedPrs: search(query: "review-requested:@me is:pr is:open", first: 100, type: ISSUE) {
+          issueCount
+          nodes {
+            ... on PullRequest {
+              number
+              title
+              url
+              createdAt
+              updatedAt
+              repository { nameWithOwner }
+              reviewRequests(first: 20) {
+                nodes {
+                  requestedReviewer {
+                    __typename
+                    ... on User { login }
+                    ... on Team { name }
+                  }
+                }
+              }
+            }
+          }
+        }
+        personalReviewRequests: search(query: "user-review-requested:@me is:pr is:open", first: 1, type: ISSUE) {
+          issueCount
+        }
       }
     `;
     const data = await ghGraphql(query);
     const viewer = data?.["viewer"] as Record<string, unknown> | undefined;
-    const prs = viewer?.["pullRequests"] as Record<string, unknown> | undefined;
-    const nodes = (prs?.["nodes"] as Array<Record<string, unknown>>) ?? [];
+    const prsNode = viewer?.["pullRequests"] as Record<string, unknown> | undefined;
+    const nodes = (prsNode?.["nodes"] as Array<Record<string, unknown>>) ?? [];
 
     const raws: RawPr[] = [];
     const followups: Array<{ raw: RawPr; owner: string; name: string; oid: string; cursor: string }> = [];
@@ -349,7 +515,45 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
         f.raw.checks.push(...more);
       }),
     );
-    return raws;
+
+    const assignedIssuesNode = (data?.["assignedIssues"] as Record<string, unknown> | undefined) ?? {};
+    const assignedIssues: RawStatItem[] = [];
+    const issueNodes = assignedIssuesNode["nodes"];
+    if (Array.isArray(issueNodes)) {
+      for (const n of issueNodes) {
+        const parsed = parseStatItemNode(n);
+        if (parsed) assignedIssues.push(parsed);
+      }
+    }
+    const assignedIssuesTotalCount =
+      typeof assignedIssuesNode["issueCount"] === "number" ? (assignedIssuesNode["issueCount"] as number) : assignedIssues.length;
+
+    const reviewReqNode = (data?.["reviewRequestedPrs"] as Record<string, unknown> | undefined) ?? {};
+    const reviewRequestedPrs: RawReviewRequestItem[] = [];
+    const reqNodes = reviewReqNode["nodes"];
+    if (Array.isArray(reqNodes)) {
+      for (const n of reqNodes) {
+        const parsed = parseReviewRequestNode(n);
+        if (parsed) reviewRequestedPrs.push(parsed);
+      }
+    }
+    const reviewRequestedPrsTotalCount =
+      typeof reviewReqNode["issueCount"] === "number" ? (reviewReqNode["issueCount"] as number) : reviewRequestedPrs.length;
+
+    const personalReviewNode = (data?.["personalReviewRequests"] as Record<string, unknown> | undefined) ?? {};
+    const personalReviewRequestsTotalCount =
+      typeof personalReviewNode["issueCount"] === "number"
+        ? (personalReviewNode["issueCount"] as number)
+        : reviewRequestedPrs.filter((r) => r.reviewerLogins.length > 0).length;
+
+    return {
+      prs: raws,
+      assignedIssues,
+      assignedIssuesTotalCount,
+      reviewRequestedPrs,
+      reviewRequestedPrsTotalCount,
+      personalReviewRequestsTotalCount,
+    };
   }
 
   async fetchMergeQueue(repo: string): Promise<RawMergeQueueEntry[]> {

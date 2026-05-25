@@ -102,6 +102,43 @@ export interface DefaultBranchJob {
   lastCompleted?: DefaultBranchJobRun | undefined;
 }
 
+export interface StatItem {
+  repo: string;
+  number: number;
+  title: string;
+  url: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReviewRequestItem extends StatItem {
+  /** True if the viewer's own login is in the PR's reviewRequests list. */
+  isPersonal: boolean;
+}
+
+export interface RepoCount {
+  repo: string;
+  count: number;
+  /** GitHub URL for the open list (issues or PRs). */
+  url: string;
+}
+
+export interface DashboardStats {
+  assignedIssues: StatItem[];
+  /**
+   * True total of assigned issues — `assignedIssues.length` is capped at 100
+   * by the GraphQL search node limit, so cards should display this count.
+   */
+  assignedIssuesTotalCount: number;
+  reviewRequests: ReviewRequestItem[];
+  /** True total of review-requested PRs (personal + team). */
+  reviewRequestsTotalCount: number;
+  /** True total of PRs where the viewer specifically (not a team) is requested. */
+  personalReviewRequestsTotalCount: number;
+  totalIssuesByRepo: RepoCount[];
+  totalPrsByRepo: RepoCount[];
+}
+
 export interface DashboardSnapshot {
   generatedAt: string;
   user: string;
@@ -118,6 +155,8 @@ export interface DashboardSnapshot {
    * come first in declared order; PR-discovered repos follow alphabetically.
    */
   repos: string[];
+  /** Viewer workload + per-repo totals. */
+  stats: DashboardStats;
   errors: string[];
 }
 

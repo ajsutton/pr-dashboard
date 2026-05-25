@@ -19,6 +19,7 @@ import {
   emptyTestSnapshot,
 } from "./testmode.js";
 import { pipelineActivity } from "./pipeline-activity.js";
+import { buildStatCards } from "./dashboard-stats.js";
 
 const conn = document.getElementById("db-conn");
 const userEl = document.getElementById("db-user");
@@ -27,6 +28,12 @@ const queuesSection = document.getElementById("db-queues-section");
 const queuesEl = document.getElementById("db-queues");
 const jobsEl = document.getElementById("db-jobs");
 const stacksEl = document.getElementById("db-stacks");
+const statsEl = document.getElementById("db-stats");
+
+// ID of the currently flipped stat card, or null if none. Survives across
+// re-renders so a snapshot arriving while a card is open doesn't snap it
+// shut. Only one card is open at a time.
+let flippedStatId = null;
 
 let latest = null;
 let updatedTicker = null;
@@ -251,6 +258,113 @@ function renderPr(pr, opts = {}) {
     </article>
   `;
 }
+
+function renderStatItemRow(item) {
+  const repoHref = prHref(item.url, item.repo, item.number);
+  const opened = fmtAge(Date.now() - Date.parse(item.createdAt || "")) || "—";
+  const updated = fmtAge(Date.now() - Date.parse(item.updatedAt || "")) || "—";
+  return `
+    <tr>
+      <td class="db-stat-table-num"><a href="${escapeAttr(item.url || repoHref)}" target="_blank" rel="noopener">${escapeHtml(item.repo)} #${item.number}</a></td>
+      <td>${escapeHtml(item.title || "")}</td>
+      <td class="db-stat-table-age">${escapeHtml(opened)}</td>
+      <td class="db-stat-table-age">${escapeHtml(updated)}</td>
+    </tr>
+  `;
+}
+
+function renderStatTotalRow(row) {
+  return `
+    <tr>
+      <td><a href="${escapeAttr(row.url)}" target="_blank" rel="noopener">${escapeHtml(row.repo)}</a></td>
+      <td class="db-stat-table-count">${row.count}</td>
+    </tr>
+  `;
+}
+
+function renderStatTable(card) {
+  if (card.kind === "items") {
+    if (!card.items.length) {
+      return `<div class="db-stat-table-empty">Nothing to do.</div>`;
+    }
+    const rows = [...card.items]
+      .sort((a, b) => Date.parse(b.createdAt || "") - Date.parse(a.createdAt || ""))
+      .map(renderStatItemRow)
+      .join("");
+    return `
+      <div class="db-stat-table-wrap">
+        <table class="db-stat-table">
+          <thead><tr><th>#</th><th>Title</th><th>Opened</th><th>Updated</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    `;
+  }
+  if (!card.items.length) {
+    return `<div class="db-stat-table-empty">No tracked projects.</div>`;
+  }
+  const rows = card.items.map(renderStatTotalRow).join("");
+  return `
+    <div class="db-stat-table-wrap">
+      <table class="db-stat-table">
+        <thead><tr><th>Project</th><th class="db-stat-table-count">Count</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderStatCard(card) {
+  const flipped = card.id === flippedStatId;
+  const countText = Number.isFinite(card.count) ? String(card.count) : "—";
+  return `
+    <button class="db-stat-card" type="button" data-stat-id="${escapeAttr(card.id)}" data-flipped="${flipped}" aria-expanded="${flipped}">
+      <div class="db-stat-face db-stat-front">
+        <span class="db-stat-count">${escapeHtml(countText)}</span>
+        <span class="db-stat-label">${escapeHtml(card.label)}</span>
+      </div>
+      <div class="db-stat-face db-stat-back">
+        <div class="db-stat-back-header">
+          <span class="db-stat-back-title">${escapeHtml(card.label)} · ${card.count}</span>
+          <span class="db-stat-back-close" data-stat-close="1">Close</span>
+        </div>
+        ${renderStatTable(card)}
+      </div>
+    </button>
+  `;
+}
+
+function renderStats(snap) {
+  if (!statsEl) return;
+  const stats = snap.stats ?? {
+    assignedIssues: [],
+    reviewRequests: [],
+    totalIssuesByRepo: [],
+    totalPrsByRepo: [],
+  };
+  const cards = buildStatCards(stats);
+  // If the previously flipped card no longer exists for any reason, clear
+  // the flipped state so the container doesn't stay locked in expanded mode.
+  if (flippedStatId && !cards.some((c) => c.id === flippedStatId)) {
+    flippedStatId = null;
+  }
+  statsEl.dataset.anyFlipped = flippedStatId ? "true" : "false";
+  statsEl.innerHTML = cards.map(renderStatCard).join("");
+}
+
+statsEl?.addEventListener("click", (ev) => {
+  const card = ev.target.closest(".db-stat-card");
+  if (!card) return;
+  const id = card.dataset.statId;
+  if (!id) return;
+  // Anchor / link inside the back face should follow the link, not toggle.
+  if (ev.target.closest("a")) return;
+  const closing = card.dataset.flipped === "true";
+  flippedStatId = closing ? null : id;
+  // Re-render so the previously open card collapses and the new one opens.
+  const snap = effectiveSnapshot();
+  if (snap) renderStats(snap);
+});
 
 function renderStacks(snap) {
   if (!snap.prs.length) {
@@ -774,6 +888,7 @@ function render() {
 
   const hadContent = stacksEl.children.length > 0 || jobsEl.children.length > 0 || queuesEl.children.length > 0;
   const doRender = () => {
+    renderStats(snap);
     renderQueues(snap, lingerQueueRepos);
     renderStacks(snap);
     renderJobs(snap);

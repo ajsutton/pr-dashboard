@@ -17,7 +17,10 @@ import {
   type RawCheckContext,
   type RawMergeQueueEntry,
   type RawPr,
+  type RawReviewRequestItem,
+  type RawStatItem,
   type RawWorkflowRun,
+  type RepoMeta,
 } from "./dashboard-github.ts";
 import {
   RealCircleCiClient,
@@ -34,9 +37,13 @@ import { buildChecksPipelineStatus, buildCircleDefaultBranchJobs, buildDefaultBr
 import type {
   CiPipelineStatus,
   DashboardSnapshot,
+  DashboardStats,
   DefaultBranchJob,
   MergeQueueEntry,
   PrCard,
+  RepoCount,
+  ReviewRequestItem,
+  StatItem,
 } from "../types.ts";
 
 const GITHUB_REFRESH_MS = 60_000;
@@ -83,6 +90,8 @@ export class DashboardPoller {
   private repos: string[] = [];
   private pinnedRepos: string[] = [];
   private errors: string[] = [];
+  private stats: DashboardStats = emptyStats();
+  private ghOrigin = "https://github.com";
 
   private ciByCommit = new Map<string, CiPipelineStatus>();
   private durationStats = new JobDurationStats();
@@ -146,24 +155,48 @@ export class DashboardPoller {
         this.viewerLogin = v.login;
         this.log(`viewer = ${this.viewerLogin || "(empty)"}`);
       }
-      this.rawPrs = await this.github.fetchMyOpenPrs();
+      const workload = await this.github.fetchViewerWorkload();
+      this.rawPrs = workload.prs;
       this.prs = buildPrCards(this.rawPrs);
-      this.log(`fetched ${this.rawPrs.length} open PRs`);
+      this.log(
+        `fetched ${this.rawPrs.length} open PRs, ${workload.assignedIssues.length} assigned issues, ${workload.reviewRequestedPrs.length} review-requested PRs`,
+      );
+      // Track the gh origin we're talking to (github.com vs GHE) so we can
+      // build links for repos that have no PR to derive an origin from.
+      this.ghOrigin = deriveGhOrigin(this.rawPrs, this.ghOrigin);
 
       const prRepos = Array.from(new Set(this.rawPrs.map((p) => p.repo))).sort(
         (a, b) => a.localeCompare(b),
       );
       // Resolve pinned + PR repos through GitHub so a transferred repo's old
       // alias collapses onto its new name; otherwise the same repo shows up
-      // twice (once via the env-var pin, once via the open PR).
-      let canonical = new Map<string, string>();
+      // twice (once via the env-var pin, once via the open PR). The same
+      // batched query also returns each repo's open issue + PR totals.
+      let repoMeta = new Map<string, RepoMeta>();
       try {
-        canonical = await this.github.resolveCanonicalRepoNames([...this.pinnedRepos, ...prRepos]);
+        repoMeta = await this.github.resolveRepoMeta([...this.pinnedRepos, ...prRepos]);
       } catch (err) {
-        this.errors.push(`canonical-repo-names: ${String(err)}`);
+        this.errors.push(`repo-meta: ${String(err)}`);
       }
-      this.repos = dedupReposByCanonical(this.pinnedRepos, prRepos, canonical);
+      this.repos = dedupReposByCanonical(this.pinnedRepos, prRepos, repoMeta);
       const repos = this.repos;
+
+      // Build a canonical-keyed meta map so totals match the deduped repo list.
+      const canonicalMeta = new Map<string, RepoMeta>();
+      for (const m of repoMeta.values()) {
+        canonicalMeta.set(m.canonical, m);
+      }
+      this.stats = buildStats({
+        viewerLogin: this.viewerLogin,
+        assignedIssues: workload.assignedIssues,
+        assignedIssuesTotalCount: workload.assignedIssuesTotalCount,
+        reviewRequestedPrs: workload.reviewRequestedPrs,
+        reviewRequestedPrsTotalCount: workload.reviewRequestedPrsTotalCount,
+        personalReviewRequestsTotalCount: workload.personalReviewRequestsTotalCount,
+        orderedRepos: this.repos,
+        repoMeta: canonicalMeta,
+        ghOrigin: this.ghOrigin,
+      });
 
       const [mqResults, defaultBranchResults] = await Promise.all([
         Promise.all(
@@ -503,6 +536,7 @@ export class DashboardPoller {
       defaultBranchJobs: this.defaultBranchJobs,
       defaultBranchByRepo: this.defaultBranchByRepo,
       repos: this.repos,
+      stats: this.stats,
       errors: [...this.errors],
     };
   }
@@ -517,9 +551,10 @@ export class DashboardPoller {
 }
 
 /**
- * Resolve pinned + PR-discovered repo names through `canonical` (a map from
- * input name to the `nameWithOwner` GitHub currently reports), then dedupe.
- * Pinned entries keep their declared order; PR-discovered entries follow.
+ * Resolve pinned + PR-discovered repo names through `repoMeta` (a map from
+ * input name to RepoMeta whose `.canonical` is the `nameWithOwner` GitHub
+ * currently reports), then dedupe. Pinned entries keep their declared order;
+ * PR-discovered entries follow.
  *
  * Why: a repo transfer leaves the old `owner/name` as a redirect alias.
  * GraphQL silently follows the redirect, so pinning the old alias while a PR
@@ -529,15 +564,103 @@ export class DashboardPoller {
 export function dedupReposByCanonical(
   pinned: string[],
   prRepos: string[],
-  canonical: Map<string, string>,
+  repoMeta: Map<string, RepoMeta>,
 ): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const r of [...pinned, ...prRepos]) {
-    const c = canonical.get(r) ?? r;
+    const c = repoMeta.get(r)?.canonical ?? r;
     if (seen.has(c)) continue;
     seen.add(c);
     out.push(c);
   }
   return out;
+}
+
+export function emptyStats(): DashboardStats {
+  return {
+    assignedIssues: [],
+    assignedIssuesTotalCount: 0,
+    reviewRequests: [],
+    reviewRequestsTotalCount: 0,
+    personalReviewRequestsTotalCount: 0,
+    totalIssuesByRepo: [],
+    totalPrsByRepo: [],
+  };
+}
+
+/**
+ * Pick the GitHub origin (github.com vs an enterprise host) from any PR URL
+ * we've already seen. Falls back to the prior origin so we don't oscillate
+ * between refreshes that produce zero PRs.
+ */
+export function deriveGhOrigin(prs: { url: string }[], fallback: string): string {
+  for (const p of prs) {
+    try {
+      return new URL(p.url).origin;
+    } catch {
+      /* skip */
+    }
+  }
+  return fallback;
+}
+
+/**
+ * Build the per-repo totals card data. The URL points at the repo's
+ * filtered issue / PR list on GitHub so the user can drill in.
+ */
+export function buildTotalsByRepo(
+  orderedRepos: string[],
+  repoMeta: Map<string, RepoMeta>,
+  kind: "issues" | "prs",
+  ghOrigin: string,
+): RepoCount[] {
+  return orderedRepos.map((repo) => {
+    const m = repoMeta.get(repo);
+    const count = kind === "issues" ? (m?.openIssues ?? 0) : (m?.openPrs ?? 0);
+    const path = kind === "issues" ? "issues?q=is%3Aissue+is%3Aopen" : "pulls?q=is%3Apr+is%3Aopen";
+    return { repo, count, url: `${ghOrigin}/${repo}/${path}` };
+  });
+}
+
+interface BuildStatsArgs {
+  viewerLogin: string;
+  assignedIssues: RawStatItem[];
+  assignedIssuesTotalCount: number;
+  reviewRequestedPrs: RawReviewRequestItem[];
+  reviewRequestedPrsTotalCount: number;
+  personalReviewRequestsTotalCount: number;
+  orderedRepos: string[];
+  repoMeta: Map<string, RepoMeta>;
+  ghOrigin: string;
+}
+
+/** Pure: assemble the DashboardStats from raw inputs. */
+export function buildStats(args: BuildStatsArgs): DashboardStats {
+  const assignedIssues: StatItem[] = args.assignedIssues.map((i) => ({
+    repo: i.repo,
+    number: i.number,
+    title: i.title,
+    url: i.url,
+    createdAt: i.createdAt,
+    updatedAt: i.updatedAt,
+  }));
+  const reviewRequests: ReviewRequestItem[] = args.reviewRequestedPrs.map((p) => ({
+    repo: p.repo,
+    number: p.number,
+    title: p.title,
+    url: p.url,
+    createdAt: p.createdAt,
+    updatedAt: p.updatedAt,
+    isPersonal: !!args.viewerLogin && p.reviewerLogins.includes(args.viewerLogin),
+  }));
+  return {
+    assignedIssues,
+    assignedIssuesTotalCount: args.assignedIssuesTotalCount,
+    reviewRequests,
+    reviewRequestsTotalCount: args.reviewRequestedPrsTotalCount,
+    personalReviewRequestsTotalCount: args.personalReviewRequestsTotalCount,
+    totalIssuesByRepo: buildTotalsByRepo(args.orderedRepos, args.repoMeta, "issues", args.ghOrigin),
+    totalPrsByRepo: buildTotalsByRepo(args.orderedRepos, args.repoMeta, "prs", args.ghOrigin),
+  };
 }

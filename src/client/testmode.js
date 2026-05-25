@@ -258,6 +258,15 @@ export function emptyTestSnapshot() {
     defaultBranchJobs: [],
     defaultBranchByRepo: [],
     repos: [],
+    stats: {
+      assignedIssues: [],
+      assignedIssuesTotalCount: 0,
+      reviewRequests: [],
+      reviewRequestsTotalCount: 0,
+      personalReviewRequestsTotalCount: 0,
+      totalIssuesByRepo: [],
+      totalPrsByRepo: [],
+    },
     errors: [],
   };
 }

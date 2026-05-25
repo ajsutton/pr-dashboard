@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { buildPrCards, buildStacks, type RawPr } from "./dashboard-github.ts";
+import {
+  buildPrCards,
+  buildStacks,
+  parseRepoMetaNode,
+  parseReviewRequestNode,
+  parseStatItemNode,
+  type RawPr,
+} from "./dashboard-github.ts";
 
 function mkRaw(over: Partial<RawPr> & { repo: string; number: number; baseRefName: string; headRefName: string }): RawPr {
   return {
@@ -170,5 +177,104 @@ describe("buildStacks", () => {
     const stacks = buildStacks(buildPrCards(raws));
     expect(stacks).toHaveLength(1);
     expect(stacks[0]!.prKeys).toEqual(["o/r#2"]);
+  });
+});
+
+describe("parseRepoMetaNode", () => {
+  test("extracts canonical name and totals from a populated node", () => {
+    const meta = parseRepoMetaNode(
+      {
+        nameWithOwner: "owner/canonical",
+        openIssues: { totalCount: 3 },
+        openPrs: { totalCount: 7 },
+      },
+      "input/alias",
+    );
+    expect(meta).toEqual({ canonical: "owner/canonical", openIssues: 3, openPrs: 7 });
+  });
+
+  test("falls back to the input repo when the node is null", () => {
+    expect(parseRepoMetaNode(null, "a/b")).toEqual({ canonical: "a/b", openIssues: 0, openPrs: 0 });
+  });
+
+  test("treats missing totalCount as 0", () => {
+    const meta = parseRepoMetaNode({ nameWithOwner: "a/b" }, "a/b");
+    expect(meta).toEqual({ canonical: "a/b", openIssues: 0, openPrs: 0 });
+  });
+});
+
+describe("parseStatItemNode", () => {
+  test("extracts repo, number, title, url, and timestamps from a search node", () => {
+    const item = parseStatItemNode({
+      number: 42,
+      title: "Fix the thing",
+      url: "https://github.com/o/r/issues/42",
+      createdAt: "2026-05-20T00:00:00Z",
+      updatedAt: "2026-05-22T00:00:00Z",
+      repository: { nameWithOwner: "o/r" },
+    });
+    expect(item).toEqual({
+      repo: "o/r",
+      number: 42,
+      title: "Fix the thing",
+      url: "https://github.com/o/r/issues/42",
+      createdAt: "2026-05-20T00:00:00Z",
+      updatedAt: "2026-05-22T00:00:00Z",
+    });
+  });
+
+  test("returns undefined when the node is missing repo or number (likely a non-Issue/PR result)", () => {
+    expect(parseStatItemNode({ number: 1 })).toBeUndefined();
+    expect(parseStatItemNode({ repository: { nameWithOwner: "o/r" } })).toBeUndefined();
+    expect(parseStatItemNode(null)).toBeUndefined();
+  });
+});
+
+describe("parseReviewRequestNode", () => {
+  test("captures User reviewer logins in reviewerLogins", () => {
+    const item = parseReviewRequestNode({
+      number: 5,
+      title: "Add the feature",
+      url: "https://github.com/o/r/pull/5",
+      createdAt: "2026-05-19T00:00:00Z",
+      updatedAt: "2026-05-21T00:00:00Z",
+      repository: { nameWithOwner: "o/r" },
+      reviewRequests: {
+        nodes: [
+          { requestedReviewer: { __typename: "User", login: "alice" } },
+          { requestedReviewer: { __typename: "User", login: "bob" } },
+        ],
+      },
+    });
+    expect(item?.reviewerLogins).toEqual(["alice", "bob"]);
+  });
+
+  test("ignores Team reviewers (no login on team nodes)", () => {
+    const item = parseReviewRequestNode({
+      number: 5,
+      title: "Add the feature",
+      url: "https://github.com/o/r/pull/5",
+      createdAt: "2026-05-19T00:00:00Z",
+      updatedAt: "2026-05-21T00:00:00Z",
+      repository: { nameWithOwner: "o/r" },
+      reviewRequests: {
+        nodes: [
+          { requestedReviewer: { __typename: "Team", name: "platform" } },
+        ],
+      },
+    });
+    expect(item?.reviewerLogins).toEqual([]);
+  });
+
+  test("handles missing reviewRequests gracefully", () => {
+    const item = parseReviewRequestNode({
+      number: 5,
+      title: "x",
+      url: "u",
+      createdAt: "c",
+      updatedAt: "u",
+      repository: { nameWithOwner: "o/r" },
+    });
+    expect(item?.reviewerLogins).toEqual([]);
   });
 });
