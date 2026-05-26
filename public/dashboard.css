@@ -525,10 +525,25 @@ body { min-height: 100vh; font-size: 16px; }
   padding: 10px 14px 2px;
 }
 .db-pr-num {
-  font-size: 22px;
+  font-size: 11px;
   font-weight: 800;
-  letter-spacing: -0.01em;
+  letter-spacing: 0.08em;
   font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.db-pr-project {
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.7;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-left: 8px;
+  text-align: right;
 }
 .db-pr-state {
   font-size: 11px;
@@ -567,13 +582,13 @@ body { min-height: 100vh; font-size: 16px; }
   align-items: baseline;
 }
 .db-ci-label {
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.1em;
   color: inherit;
 }
 .db-ci-time {
-  font-size: 12px;
+  font-size: 11px;
   color: inherit;
   opacity: 0.85;
   font-variant-numeric: tabular-nums;
@@ -1123,10 +1138,11 @@ body { min-height: 100vh; font-size: 16px; }
   .db-jobs-grid { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
   .db-job-project { font-size: 13px; }
   .db-job-project-branch { font-size: 11px; }
-  .db-pr-num { font-size: 30px; }
+  .db-pr-num { font-size: 13px; }
+  .db-pr-project { font-size: 13px; }
   .db-pr-title { font-size: 19px; }
-  .db-ci-label { font-size: 16px; }
-  .db-ci-time { font-size: 14px; }
+  .db-ci-label { font-size: 13px; }
+  .db-ci-time { font-size: 13px; }
   .db-branch-repo { font-size: 20px; }
   .db-job-name { font-size: 17px; }
   .db-queue-card { flex-basis: 240px; }
@@ -1136,8 +1152,10 @@ body { min-height: 100vh; font-size: 16px; }
 @media (min-width: 2200px) {
   body { font-size: 22px; }
   .db-title { font-size: 44px; }
-  .db-pr-num { font-size: 42px; }
+  .db-pr-num { font-size: 15px; }
+  .db-pr-project { font-size: 15px; }
   .db-pr-title { font-size: 24px; }
-  .db-ci-label { font-size: 20px; }
+  .db-ci-label { font-size: 15px; }
+  .db-ci-time { font-size: 15px; }
   .db-job-name { font-size: 22px; }
 }

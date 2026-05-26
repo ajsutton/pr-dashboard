@@ -266,11 +266,14 @@ function renderPr(pr, opts = {}) {
   const bridgeHtml = parentAdjacent
     ? `<div class="db-pr-bridge" aria-hidden="true">${STACK_ARROW_SVG}</div>`
     : "";
+  const slash = pr.repo.indexOf("/");
+  const projectName = slash >= 0 ? pr.repo.slice(slash + 1) : pr.repo;
   return `
     <article class="db-pr${lc}" data-pr-key="${escapeAttr(pr.key)}" data-review="${review}" data-ci="${ciT}" data-status="${escapeAttr(ciStatus)}" style="view-transition-name: ${vt}">
       ${bridgeHtml}
       <header class="db-pr-head">
         <span class="db-pr-num">#${pr.number}</span>
+        <span class="db-pr-project" title="${escapeAttr(pr.repo)}">${escapeHtml(projectName)}</span>
       </header>
       <a class="db-pr-title" href="${escapeAttr(pr.url)}" target="_blank" rel="noopener">${escapeHtml(pr.title)}</a>
       ${renderCi(pr.ci)}
