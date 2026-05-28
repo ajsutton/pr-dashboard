@@ -23,6 +23,25 @@ export function prActionRank(pr) {
   return 4;
 }
 
+/**
+ * Stacks with their merge-queued PRs stripped out, dropping any stack left
+ * empty. PRs in the merge queue render as queue cards rather than stack cards,
+ * so the "My PRs" section should only count PRs that still live in a stack.
+ * An empty result means the section has nothing to show and should be hidden.
+ */
+export function computeVisibleStacks(snap) {
+  const byKey = new Map((snap.prs ?? []).map((p) => [p.key, p]));
+  return (snap.stacks ?? [])
+    .map((stack) => ({
+      ...stack,
+      prKeys: stack.prKeys.filter((k) => {
+        const pr = byKey.get(k);
+        return pr && !pr.isInMergeQueue;
+      }),
+    }))
+    .filter((s) => s.prKeys.length > 0);
+}
+
 function stackRank(stack, byKey) {
   let best = 99;
   for (const k of stack.prKeys) {

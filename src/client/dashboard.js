@@ -3,7 +3,7 @@
  * and renders the latest dashboard-snapshot messages.
  */
 
-import { sortStacks } from "./dashboard-sort.js";
+import { sortStacks, computeVisibleStacks } from "./dashboard-sort.js";
 import {
   diffPrLifecycles,
   prLifecycleState,
@@ -27,6 +27,7 @@ const updatedEl = document.getElementById("db-updated");
 const queuesSection = document.getElementById("db-queues-section");
 const queuesEl = document.getElementById("db-queues");
 const jobsEl = document.getElementById("db-jobs");
+const stacksSection = document.getElementById("db-stacks-section");
 const stacksEl = document.getElementById("db-stacks");
 const statsEl = document.getElementById("db-stats");
 
@@ -511,28 +512,21 @@ document.addEventListener("keydown", (ev) => {
 });
 
 function renderStacks(snap) {
-  if (!snap.prs.length) {
-    stacksEl.innerHTML = `<div class="db-empty">No open PRs.</div>`;
-    return;
-  }
-  const byKey = new Map(snap.prs.map((p) => [p.key, p]));
-  // PRs in the merge queue render as queue cards, not stack cards. Sharing
-  // a view-transition-name across both would error; this also makes the
-  // move-to-queue feel like the PR has left the stack.
-  const visibleStacks = snap.stacks
-    .map((stack) => ({
-      ...stack,
-      prKeys: stack.prKeys.filter((k) => {
-        const pr = byKey.get(k);
-        return pr && !pr.isInMergeQueue;
-      }),
-    }))
-    .filter((s) => s.prKeys.length > 0);
-
+  // PRs in the merge queue render as queue cards, not stack cards (sharing a
+  // view-transition-name across both would error, and it makes the move-to-
+  // queue feel like the PR has left the stack). When nothing is left to list —
+  // no open PRs, or every open PR is in the merge queue — hide the whole
+  // section. Toggling `hidden` inside the view-transition render fades the
+  // section out and slides the sections below it up.
+  const visibleStacks = computeVisibleStacks(snap);
   if (!visibleStacks.length) {
-    stacksEl.innerHTML = `<div class="db-empty">All open PRs are queued for merge.</div>`;
+    stacksSection.hidden = true;
+    stacksEl.innerHTML = "";
     return;
   }
+  stacksSection.hidden = false;
+
+  const byKey = new Map(snap.prs.map((p) => [p.key, p]));
 
   // Flatten sorted stacks into a single grid of PR cards. Stack ordering is
   // preserved so descendants render right after their root in the grid; the

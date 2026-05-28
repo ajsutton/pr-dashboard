@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { prActionRank, sortStacks } from './dashboard-sort.js';
+import { prActionRank, sortStacks, computeVisibleStacks } from './dashboard-sort.js';
 
 const mkPr = (overrides = {}) => ({
   key: overrides.key ?? `o/r#${overrides.number ?? 1}`,
@@ -117,5 +117,42 @@ describe('sortStacks', () => {
     const original = stacks.map((s) => s.rootKey);
     sortStacks(stacks, byKey);
     expect(stacks.map((s) => s.rootKey)).toEqual(original);
+  });
+});
+
+describe('computeVisibleStacks', () => {
+  it('returns no stacks when there are no open PRs', () => {
+    expect(computeVisibleStacks({ prs: [], stacks: [] })).toEqual([]);
+  });
+
+  it('returns no stacks when every open PR is in the merge queue', () => {
+    const snap = {
+      prs: [
+        mkPr({ key: 'o/r#1', number: 1, isInMergeQueue: true }),
+        mkPr({ key: 'o/r#2', number: 2, isInMergeQueue: true }),
+      ],
+      stacks: [
+        { rootKey: 'o/r#1', prKeys: ['o/r#1'] },
+        { rootKey: 'o/r#2', prKeys: ['o/r#2'] },
+      ],
+    };
+    expect(computeVisibleStacks(snap)).toEqual([]);
+  });
+
+  it('drops queued PRs but keeps stacks that still have a non-queued PR', () => {
+    const snap = {
+      prs: [
+        mkPr({ key: 'o/r#1', number: 1, isInMergeQueue: true }),
+        mkPr({ key: 'o/r#2', number: 2, isInMergeQueue: false }),
+      ],
+      stacks: [{ rootKey: 'o/r#1', prKeys: ['o/r#1', 'o/r#2'] }],
+    };
+    const visible = computeVisibleStacks(snap);
+    expect(visible).toHaveLength(1);
+    expect(visible[0].prKeys).toEqual(['o/r#2']);
+  });
+
+  it('tolerates missing prs/stacks fields', () => {
+    expect(computeVisibleStacks({})).toEqual([]);
   });
 });

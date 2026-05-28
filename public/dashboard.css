@@ -390,6 +390,13 @@ body { min-height: 100vh; font-size: 16px; }
  * (root first). The "Stacked on #N" footer + chain glyph on non-root PRs is
  * what visually ties a stack together.
  */
+/* Naming the section as a view-transition group lets it cross-fade out when
+ * it goes empty (renderStacks toggles `hidden` inside startViewTransition);
+ * the named job cards below it slide up into the freed space. */
+#db-stacks-section {
+  view-transition-name: db-stacks-section;
+}
+
 .db-stacks {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
