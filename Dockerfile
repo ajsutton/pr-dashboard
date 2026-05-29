@@ -1,7 +1,7 @@
 FROM oven/bun:1-slim
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg \
+        ca-certificates curl gnupg tini \
     && mkdir -p -m 755 /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
@@ -23,4 +23,4 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV DASHBOARD_PORT=3456
 ENV DASHBOARD_HOST=0.0.0.0
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["tini", "--", "/usr/local/bin/entrypoint.sh"]
