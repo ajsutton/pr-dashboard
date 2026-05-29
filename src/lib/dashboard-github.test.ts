@@ -7,6 +7,7 @@ import {
   parseRepoMetaNode,
   parseReviewRequestNode,
   parseStatItemNode,
+  rateLimitDelayMs,
   type RawPr,
 } from "./dashboard-github.ts";
 
@@ -198,13 +199,27 @@ describe("ghRest / ghGraphql (direct GitHub REST/GraphQL over fetch)", () => {
     else process.env.GH_TOKEN = realToken;
   });
 
-  function stubFetch(response: { ok?: boolean; body?: unknown }) {
+  type FakeRes = { status?: number; body?: unknown; headers?: Record<string, string> };
+  function mkRes(r: FakeRes): Response {
+    const status = r.status ?? 200;
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      headers: new Headers(r.headers ?? {}),
+      json: () => Promise.resolve(r.body ?? {}),
+    } as Response;
+  }
+  function stubFetch(r: FakeRes) {
     globalThis.fetch = ((url: string, init?: RequestInit) => {
       calls.push({ url: String(url), init });
-      return Promise.resolve({
-        ok: response.ok ?? true,
-        json: () => Promise.resolve(response.body ?? {}),
-      } as Response);
+      return Promise.resolve(mkRes(r));
+    }) as typeof fetch;
+  }
+  // Replays responses in order; the last entry repeats once exhausted.
+  function stubFetchSequence(rs: FakeRes[]) {
+    globalThis.fetch = ((url: string, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return Promise.resolve(mkRes(rs[Math.min(calls.length - 1, rs.length - 1)]!));
     }) as typeof fetch;
   }
 
@@ -220,7 +235,7 @@ describe("ghRest / ghGraphql (direct GitHub REST/GraphQL over fetch)", () => {
   });
 
   test("ghRest returns undefined on a non-2xx response", async () => {
-    stubFetch({ ok: false });
+    stubFetch({ status: 404 });
     expect(await ghRest("/repos/o/r")).toBeUndefined();
   });
 
@@ -235,7 +250,7 @@ describe("ghRest / ghGraphql (direct GitHub REST/GraphQL over fetch)", () => {
   });
 
   test("ghGraphql returns undefined on a non-2xx response", async () => {
-    stubFetch({ ok: false });
+    stubFetch({ status: 500 });
     expect(await ghGraphql("query { x }")).toBeUndefined();
   });
 
@@ -245,6 +260,72 @@ describe("ghRest / ghGraphql (direct GitHub REST/GraphQL over fetch)", () => {
     await ghRest("/x");
     const headers = calls[0]!.init!.headers as Record<string, string>;
     expect(headers["Authorization"]).toBeUndefined();
+  });
+
+  test("retries after a rate-limit response, then returns the eventual success", async () => {
+    stubFetchSequence([
+      { status: 429, headers: { "retry-after": "0" } },
+      { status: 200, body: { workflow_runs: [] } },
+    ]);
+    const data = await ghRest("/repos/o/r/actions/runs");
+    expect(calls).toHaveLength(2);
+    expect(data).toEqual({ workflow_runs: [] });
+  });
+
+  test("gives up (returns undefined) after exhausting retries on persistent rate limiting", async () => {
+    stubFetch({ status: 403, headers: { "retry-after": "0", "x-ratelimit-remaining": "0" } });
+    const data = await ghRest("/repos/o/r");
+    expect(data).toBeUndefined();
+    // initial attempt + MAX_RETRIES (3) follow-ups
+    expect(calls).toHaveLength(4);
+  });
+});
+
+describe("rateLimitDelayMs", () => {
+  const reset = (secsFromNow: number, now: number) => String(Math.floor(now / 1000) + secsFromNow);
+
+  test("returns null for non-rate-limit responses", () => {
+    expect(rateLimitDelayMs({ status: 200, headers: new Headers() }, 0)).toBeNull();
+    expect(rateLimitDelayMs({ status: 404, headers: new Headers() }, 0)).toBeNull();
+    // A 403 that isn't a rate limit (e.g. plain forbidden) shouldn't trigger retries.
+    expect(rateLimitDelayMs({ status: 403, headers: new Headers() }, 0)).toBeNull();
+  });
+
+  test("honours Retry-After (seconds) on a 429", () => {
+    expect(rateLimitDelayMs({ status: 429, headers: new Headers({ "retry-after": "2" }) }, 0)).toBe(2000);
+  });
+
+  test("waits until X-RateLimit-Reset when the primary limit is exhausted (403 + remaining 0)", () => {
+    const now = 1_000_000_000_000;
+    const delay = rateLimitDelayMs(
+      { status: 403, headers: new Headers({ "x-ratelimit-remaining": "0", "x-ratelimit-reset": reset(5, now) }) },
+      now,
+    );
+    expect(delay).toBe(5000);
+  });
+
+  test("falls back to a brief pause when rate-limited with no timing hint", () => {
+    expect(rateLimitDelayMs({ status: 429, headers: new Headers() }, 0)).toBe(1000);
+  });
+
+  test("gives up (null) when the required wait exceeds the cap — don't stall the poll cycle", () => {
+    const now = 1_000_000_000_000;
+    expect(
+      rateLimitDelayMs(
+        { status: 403, headers: new Headers({ "x-ratelimit-remaining": "0", "x-ratelimit-reset": reset(3600, now) }) },
+        now,
+      ),
+    ).toBeNull();
+  });
+
+  test("clamps a past reset to 0 rather than returning a negative delay", () => {
+    const now = 1_000_000_000_000;
+    expect(
+      rateLimitDelayMs(
+        { status: 403, headers: new Headers({ "x-ratelimit-remaining": "0", "x-ratelimit-reset": reset(-10, now) }) },
+        now,
+      ),
+    ).toBe(0);
   });
 });
 

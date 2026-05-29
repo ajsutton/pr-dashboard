@@ -166,11 +166,72 @@ function ghHeaders(): Record<string, string> {
   return headers;
 }
 
+/** Follow-up attempts after the first request when GitHub rate-limits us. */
+const MAX_RETRIES = 3;
+/**
+ * Never block a single request longer than this waiting out a rate limit. The
+ * poller refreshes GitHub every 60s, so if the reset is further off than this
+ * it's cheaper to give up and let the next cycle retry than to stall the whole
+ * refresh behind one request.
+ */
+const MAX_RATE_LIMIT_WAIT_MS = 30_000;
+
+/**
+ * If `res` indicates a GitHub rate limit (primary or secondary), return how
+ * long to wait before retrying in ms; otherwise null. Also returns null when
+ * the wait would exceed MAX_RATE_LIMIT_WAIT_MS — caller should give up rather
+ * than stall. Exported for unit tests.
+ *
+ * Signals, in priority order:
+ *  - `Retry-After: <seconds>` — sent for secondary (abuse) limits.
+ *  - `X-RateLimit-Reset: <epoch seconds>` when `X-RateLimit-Remaining: 0` —
+ *    primary limit exhausted; wait until the window resets.
+ *  - 429/403 with neither hint — brief fixed pause.
+ */
+export function rateLimitDelayMs(res: { status: number; headers: Headers }, now: number): number | null {
+  const retryAfter = res.headers.get("retry-after");
+  const remaining = res.headers.get("x-ratelimit-remaining");
+  const reset = res.headers.get("x-ratelimit-reset");
+  const limited = res.status === 429 || (res.status === 403 && (remaining === "0" || retryAfter !== null));
+  if (!limited) return null;
+
+  let waitMs: number;
+  if (retryAfter !== null && /^\d+$/.test(retryAfter.trim())) {
+    waitMs = parseInt(retryAfter, 10) * 1000;
+  } else if (reset !== null && /^\d+$/.test(reset.trim())) {
+    waitMs = parseInt(reset, 10) * 1000 - now;
+  } else {
+    waitMs = 1000;
+  }
+  waitMs = Math.max(0, waitMs);
+  return waitMs > MAX_RATE_LIMIT_WAIT_MS ? null : waitMs;
+}
+
+/**
+ * fetch() wrapper that transparently waits out and retries GitHub rate limits.
+ * Returns the final Response (success or otherwise) so callers handle non-2xx
+ * uniformly, or undefined if the request itself threw.
+ */
+async function githubFetch(url: string, init?: RequestInit): Promise<Response | undefined> {
+  for (let attempt = 0; ; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(url, init);
+    } catch {
+      return undefined;
+    }
+    if (res.ok || attempt >= MAX_RETRIES) return res;
+    const delay = rateLimitDelayMs(res, Date.now());
+    if (delay === null) return res;
+    await Bun.sleep(delay);
+  }
+}
+
 /** Exported for unit tests. */
 export async function ghRest(path: string): Promise<unknown> {
+  const res = await githubFetch(`${GITHUB_API}${path}`, { headers: ghHeaders() });
+  if (!res?.ok) return undefined;
   try {
-    const res = await fetch(`${GITHUB_API}${path}`, { headers: ghHeaders() });
-    if (!res.ok) return undefined;
     return await res.json();
   } catch {
     return undefined;
@@ -179,13 +240,13 @@ export async function ghRest(path: string): Promise<unknown> {
 
 /** Exported for unit tests. */
 export async function ghGraphql(query: string, vars: Record<string, unknown> = {}): Promise<Record<string, unknown> | undefined> {
+  const res = await githubFetch(`${GITHUB_API}/graphql`, {
+    method: "POST",
+    headers: { ...ghHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ query, variables: vars }),
+  });
+  if (!res?.ok) return undefined;
   try {
-    const res = await fetch(`${GITHUB_API}/graphql`, {
-      method: "POST",
-      headers: { ...ghHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({ query, variables: vars }),
-    });
-    if (!res.ok) return undefined;
     const parsed = (await res.json()) as { data?: Record<string, unknown> };
     return parsed.data;
   } catch {
