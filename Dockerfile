@@ -1,10 +1,9 @@
-FROM oven/bun:1-slim
+FROM oven/bun:1-alpine
 
 # The dashboard talks to GitHub over native fetch (api.github.com), so no gh
 # CLI is needed at runtime — just TLS roots and tini as PID 1 for signals.
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates tini \
-    && rm -rf /var/lib/apt/lists/*
+# Alpine has no bash, so entrypoint.sh is plain POSIX sh.
+RUN apk add --no-cache ca-certificates tini
 
 WORKDIR /app
 COPY package.json bun.lock ./

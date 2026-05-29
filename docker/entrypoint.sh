@@ -1,5 +1,5 @@
-#!/bin/bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 if [ -f /run/secrets/gh_token ]; then
   GH_TOKEN=$(cat /run/secrets/gh_token); export GH_TOKEN
