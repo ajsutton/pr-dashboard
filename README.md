@@ -31,7 +31,18 @@ Open `http://127.0.0.1:3456`.
 
 ## Docker
 
-Set up `.env` and the token secrets (both gitignored):
+Quickest start — pull the published image and run it directly:
+
+```bash
+docker run --rm -p 3456:3456 -e GH_TOKEN="$(gh auth token)" ghcr.io/ajsutton/pr-dashboard:latest
+```
+
+Open `http://127.0.0.1:3456`. Add `-e CITOKEN=…` for private CircleCI, or
+`-e DASHBOARD_REPOS=org/repo-a,org/repo-b` to pin repos. The container runs
+under tini, so Ctrl-C stops it cleanly.
+
+For a persistent setup with token files instead of env vars, use compose. Set
+up `.env` and the token secrets (both gitignored):
 
 ```bash
 cp .env.example .env
