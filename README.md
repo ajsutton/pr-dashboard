@@ -1,4 +1,4 @@
-# dashboard
+# pr-dashboard
 
 Real-time PR + CI dashboard. Polls GitHub and CircleCI for PRs you author or review and rolls up their status into a single view.
 
@@ -31,14 +31,14 @@ Open `http://127.0.0.1:3456`.
 
 ## Docker
 
-Prerequisite: the workspace-level `.env` and `.secrets/gh_token` must exist (the dashboard image reuses them via `dashboard/compose.yml`'s `../.env` source and `../.secrets/...` mounts). Setup from a fresh workspace clone:
+Set up `.env` and the token secrets (both gitignored):
 
 ```bash
-cp ../.env.example ../.env
-$EDITOR ../.env                      # optional: BIND_HOST, DASHBOARD_REPOS
-mkdir -p ../.secrets && chmod 700 ../.secrets
-printf '%s' "$(gh auth token)" > ../.secrets/gh_token
-chmod 600 ../.secrets/*
+cp .env.example .env
+$EDITOR .env                         # optional: BIND_HOST, DASHBOARD_REPOS, UID/GID
+mkdir -p .secrets && chmod 700 .secrets
+printf '%s' "$(gh auth token)" > .secrets/gh_token
+chmod 600 .secrets/*
 ```
 
 Then:
@@ -49,7 +49,7 @@ Then:
 ./start.sh stop
 ```
 
-Or pull the published image directly: `ghcr.io/ajsutton/todo-ui-dashboard:latest`.
+Or pull the published image directly: `ghcr.io/ajsutton/pr-dashboard:latest`.
 
 ## Testing
 

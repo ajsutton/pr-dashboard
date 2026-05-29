@@ -19,6 +19,6 @@ services:
 
 secrets:
   gh_token:
-    file: ../.secrets/gh_token
+    file: ./.secrets/gh_token
   ci_token:
-    file: ../.secrets/ci_token
+    file: ./.secrets/ci_token

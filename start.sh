@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 export UID
 export GID="${GID:-$(id -g)}"
-if [ -f ../.env ]; then set -a; . ../.env; set +a; fi
+if [ -f .env ]; then set -a; . .env; set +a; fi
 case "${1:-start}" in
   start)   docker compose up -d ;;
   stop)    docker compose down ;;
