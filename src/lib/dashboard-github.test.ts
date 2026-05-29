@@ -1,7 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   buildPrCards,
   buildStacks,
+  ghGraphql,
+  ghRest,
   parseRepoMetaNode,
   parseReviewRequestNode,
   parseStatItemNode,
@@ -177,6 +179,72 @@ describe("buildStacks", () => {
     const stacks = buildStacks(buildPrCards(raws));
     expect(stacks).toHaveLength(1);
     expect(stacks[0]!.prKeys).toEqual(["o/r#2"]);
+  });
+});
+
+describe("ghRest / ghGraphql (direct GitHub REST/GraphQL over fetch)", () => {
+  const realFetch = globalThis.fetch;
+  const realToken = process.env.GH_TOKEN;
+  let calls: { url: string; init: RequestInit | undefined }[];
+
+  beforeEach(() => {
+    calls = [];
+    process.env.GH_TOKEN = "tok-123";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    if (realToken === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = realToken;
+  });
+
+  function stubFetch(response: { ok?: boolean; body?: unknown }) {
+    globalThis.fetch = ((url: string, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return Promise.resolve({
+        ok: response.ok ?? true,
+        json: () => Promise.resolve(response.body ?? {}),
+      } as Response);
+    }) as typeof fetch;
+  }
+
+  test("ghRest hits api.github.com with the bearer token and returns parsed JSON", async () => {
+    stubFetch({ body: { workflow_runs: [{ id: 1 }] } });
+    const data = await ghRest("/repos/o/r/actions/runs?page=1");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("https://api.github.com/repos/o/r/actions/runs?page=1");
+    const headers = calls[0]!.init!.headers as Record<string, string>;
+    expect(headers["Authorization"]).toBe("Bearer tok-123");
+    expect(headers["Accept"]).toContain("github");
+    expect(data).toEqual({ workflow_runs: [{ id: 1 }] });
+  });
+
+  test("ghRest returns undefined on a non-2xx response", async () => {
+    stubFetch({ ok: false });
+    expect(await ghRest("/repos/o/r")).toBeUndefined();
+  });
+
+  test("ghGraphql POSTs query + variables to /graphql and unwraps the data field", async () => {
+    stubFetch({ body: { data: { viewer: { login: "me" } } } });
+    const data = await ghGraphql("query($a: String!) { x }", { a: "v" });
+    expect(calls[0]!.url).toBe("https://api.github.com/graphql");
+    expect(calls[0]!.init!.method).toBe("POST");
+    const body = JSON.parse(String(calls[0]!.init!.body));
+    expect(body).toEqual({ query: "query($a: String!) { x }", variables: { a: "v" } });
+    expect(data).toEqual({ viewer: { login: "me" } });
+  });
+
+  test("ghGraphql returns undefined on a non-2xx response", async () => {
+    stubFetch({ ok: false });
+    expect(await ghGraphql("query { x }")).toBeUndefined();
+  });
+
+  test("omits the Authorization header when no token is set", async () => {
+    delete process.env.GH_TOKEN;
+    stubFetch({ body: {} });
+    await ghRest("/x");
+    const headers = calls[0]!.init!.headers as Record<string, string>;
+    expect(headers["Authorization"]).toBeUndefined();
   });
 });
 

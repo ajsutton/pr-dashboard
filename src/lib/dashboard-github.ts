@@ -147,29 +147,46 @@ export interface DashboardGitHubClient {
   fetchDefaultBranchRecentRuns(repo: string, branch: string, windowHours: number): Promise<RawWorkflowRun[]>;
 }
 
-async function ghRest(path: string): Promise<unknown> {
-  const proc = Bun.spawn(["gh", "api", path]);
-  const out = await new Response(proc.stdout).text();
-  const exit = await proc.exited;
-  if (exit !== 0) return undefined;
+const GITHUB_API = "https://api.github.com";
+
+/**
+ * Headers for every GitHub call. Auth comes from `$GH_TOKEN` (the same env var
+ * the `gh` CLI reads), so the host setup is unchanged — only the transport
+ * moved from spawning `gh` to native `fetch`, which lets the Docker image drop
+ * the gh CLI entirely. Only github.com is supported (no GHE).
+ */
+function ghHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "pr-dashboard",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  const token = process.env.GH_TOKEN;
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  return headers;
+}
+
+/** Exported for unit tests. */
+export async function ghRest(path: string): Promise<unknown> {
   try {
-    return JSON.parse(out);
+    const res = await fetch(`${GITHUB_API}${path}`, { headers: ghHeaders() });
+    if (!res.ok) return undefined;
+    return await res.json();
   } catch {
     return undefined;
   }
 }
 
-async function ghGraphql(query: string, vars: Record<string, unknown> = {}): Promise<Record<string, unknown> | undefined> {
-  const args = ["api", "graphql", "-f", `query=${query}`];
-  for (const [k, v] of Object.entries(vars)) {
-    args.push("-f", `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`);
-  }
-  const proc = Bun.spawn(["gh", ...args]);
-  const out = await new Response(proc.stdout).text();
-  const exit = await proc.exited;
-  if (exit !== 0) return undefined;
+/** Exported for unit tests. */
+export async function ghGraphql(query: string, vars: Record<string, unknown> = {}): Promise<Record<string, unknown> | undefined> {
   try {
-    const parsed = JSON.parse(out) as { data?: Record<string, unknown> };
+    const res = await fetch(`${GITHUB_API}/graphql`, {
+      method: "POST",
+      headers: { ...ghHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ query, variables: vars }),
+    });
+    if (!res.ok) return undefined;
+    const parsed = (await res.json()) as { data?: Record<string, unknown> };
     return parsed.data;
   } catch {
     return undefined;
