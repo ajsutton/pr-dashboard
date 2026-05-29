@@ -27,7 +27,7 @@ Open `http://127.0.0.1:3456`.
 | `BASE_PATH` | `/` | subpath prefix for reverse-proxy hosting |
 | `DASHBOARD_REPOS` | (empty) | comma-separated `owner/repo` list to pin |
 | `GH_TOKEN` | (required) | GitHub PAT or `gh auth token` |
-| `CITOKEN` | (optional) | CircleCI token for richer CI status |
+| `CITOKEN` | (optional) | CircleCI personal API token — needed to read private CircleCI projects and to lift the per-IP rate limit |
 
 ## Docker
 
@@ -38,6 +38,11 @@ cp .env.example .env
 $EDITOR .env                         # optional: BIND_HOST, DASHBOARD_REPOS, UID/GID
 mkdir -p .secrets && chmod 700 .secrets
 printf '%s' "$(gh auth token)" > .secrets/gh_token
+
+# CircleCI token (.secrets/ci_token): lets the dashboard read private CircleCI
+# projects and lifts the per-IP rate limit. Compose mounts it as a secret, so the
+# file must exist — but it may be empty if you don't use CircleCI:
+printf '%s' "$YOUR_CIRCLECI_TOKEN" > .secrets/ci_token   # or: : > .secrets/ci_token
 chmod 600 .secrets/*
 ```
 

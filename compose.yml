@@ -1,8 +1,8 @@
 services:
-  todo-ui-dashboard:
+  pr-dashboard:
     build: .
-    # image: ghcr.io/ajsutton/todo-ui-dashboard:latest
-    container_name: todo-ui-dashboard
+    # image: ghcr.io/ajsutton/pr-dashboard:latest
+    container_name: pr-dashboard
     user: "${UID}:${GID}"
     command: ["bun", "--watch", "/app/src/server.ts"]
     ports:
