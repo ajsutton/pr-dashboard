@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { boardAllGreen } from './board-green.js';
+import { boardAllGreen, nextKermitAction } from './board-green.js';
 
 // Minimal snapshot builders — only the fields boardAllGreen reads.
 const pr = (rolledUp) => ({ ci: rolledUp ? { rolledUp } : null });
@@ -96,5 +96,38 @@ describe('boardAllGreen', () => {
         }),
       ),
     ).toBe(false);
+  });
+});
+
+describe('nextKermitAction', () => {
+  const at = (over = {}) =>
+    nextKermitAction({ green: false, visible: false, falling: false, reducedMotion: false, ...over });
+
+  it('hops Kermit onto the pill when the board goes green and he is absent', () => {
+    expect(at({ green: true, visible: false })).toBe('show');
+  });
+
+  it('does nothing while green and already perched', () => {
+    expect(at({ green: true, visible: true })).toBe('none');
+  });
+
+  it('recovers (hops back up) if the board goes green again mid-fall', () => {
+    expect(at({ green: true, visible: true, falling: true })).toBe('show');
+  });
+
+  it('topples Kermit backwards when the board goes red while he is perched', () => {
+    expect(at({ green: false, visible: true })).toBe('fall');
+  });
+
+  it('does not restart the topple if he is already falling', () => {
+    expect(at({ green: false, visible: true, falling: true })).toBe('none');
+  });
+
+  it('does nothing when red and he is already gone', () => {
+    expect(at({ green: false, visible: false })).toBe('none');
+  });
+
+  it('skips the topple and hides immediately under reduced motion', () => {
+    expect(at({ green: false, visible: true, reducedMotion: true })).toBe('hide');
   });
 });

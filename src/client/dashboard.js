@@ -20,10 +20,13 @@ import {
 } from "./testmode.js";
 import { pipelineActivity } from "./pipeline-activity.js";
 import { buildStatCards } from "./dashboard-stats.js";
-import { boardAllGreen } from "./board-green.js";
+import { boardAllGreen, nextKermitAction } from "./board-green.js";
 
 const conn = document.getElementById("db-conn");
 const kermitEl = document.getElementById("db-kermit");
+// Pending animationend handler while Kermit topples off the pill, so a green
+// board mid-fall can cancel it instead of leaking a listener.
+let kermitFallEnd = null;
 const userEl = document.getElementById("db-user");
 const updatedEl = document.getElementById("db-updated");
 const queuesSection = document.getElementById("db-queues-section");
@@ -1078,14 +1081,50 @@ function render() {
 }
 
 /**
- * Show Kermit perched on the status pill when the whole board is green,
- * hide him otherwise. Toggled outside any view-transition so his CSS
- * hop-in animation plays cleanly when he appears rather than being
- * captured into the db-meta crossfade.
+ * Show Kermit perched on the status pill when the whole board is green; when
+ * it goes red, topple him backwards off the pill (CSS `db-kermit-fall`) and
+ * hide him once he's dropped out of sight. Toggled outside any view-transition
+ * so his hop-in / topple animations play cleanly rather than being captured
+ * into the db-meta crossfade.
  */
 function updateKermit(snap) {
   if (!kermitEl) return;
-  kermitEl.hidden = !boardAllGreen(snap);
+  const reducedMotion =
+    window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const action = nextKermitAction({
+    green: boardAllGreen(snap),
+    visible: !kermitEl.hidden,
+    falling: kermitEl.classList.contains("db-kermit-falling"),
+    reducedMotion,
+  });
+
+  switch (action) {
+    case "show":
+      // Cancel any in-progress topple and (re)perch him; removing the class
+      // swaps the animation back to the hop-in, reading as a hop back up.
+      if (kermitFallEnd) {
+        kermitEl.removeEventListener("animationend", kermitFallEnd);
+        kermitFallEnd = null;
+      }
+      kermitEl.classList.remove("db-kermit-falling");
+      kermitEl.hidden = false;
+      break;
+    case "fall":
+      kermitFallEnd = () => {
+        kermitEl.removeEventListener("animationend", kermitFallEnd);
+        kermitFallEnd = null;
+        kermitEl.classList.remove("db-kermit-falling");
+        kermitEl.hidden = true;
+      };
+      kermitEl.addEventListener("animationend", kermitFallEnd);
+      kermitEl.classList.add("db-kermit-falling");
+      break;
+    case "hide":
+      kermitEl.hidden = true;
+      break;
+    case "none":
+      break;
+  }
 }
 
 function clearLifecycleClasses() {

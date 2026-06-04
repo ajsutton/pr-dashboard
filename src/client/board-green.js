@@ -40,6 +40,31 @@ export function boardAllGreen(snap) {
   return true;
 }
 
+/**
+ * Decide what Kermit should do for the latest board state. Pure so the
+ * appear/topple/hide state machine can be unit-tested without a DOM.
+ *
+ *   - `show`  — perch him (hop-in); also used to recover if the board flips
+ *               back to green while he's mid-topple.
+ *   - `fall`  — board went red while he was perched: topple backwards off the
+ *               pill, then hide.
+ *   - `hide`  — same trigger as `fall` but under reduced motion: just leave,
+ *               no animation.
+ *   - `none`  — nothing to do (already perched, already gone, already falling).
+ *
+ * @param {{green: boolean, visible: boolean, falling: boolean, reducedMotion: boolean}} state
+ * @returns {'show' | 'fall' | 'hide' | 'none'}
+ */
+export function nextKermitAction({ green, visible, falling, reducedMotion }) {
+  if (green) {
+    // Perch him if he's away, or catch him mid-fall and hop him back up.
+    return !visible || falling ? 'show' : 'none';
+  }
+  // Board is red. Only act if he's currently perched and not already toppling.
+  if (!visible || falling) return 'none';
+  return reducedMotion ? 'hide' : 'fall';
+}
+
 function jobFailing(job) {
   const latest = job.latest?.status;
   if (latest === 'failed' || latest === 'blocked') return true;
