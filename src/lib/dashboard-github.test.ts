@@ -346,6 +346,106 @@ describe("RealDashboardGitHubClient.fetchViewerWorkload (failure handling)", () 
   });
 });
 
+describe("fetchViewerWorkload (adaptive combined→split + repo scoping)", () => {
+  const realFetch = globalThis.fetch;
+  const realToken = process.env.GH_TOKEN;
+  let queries: string[] = [];
+
+  beforeEach(() => {
+    process.env.GH_TOKEN = "tok-123";
+    queries = [];
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    if (realToken === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = realToken;
+  });
+
+  const samplePrNode = {
+    repository: { nameWithOwner: "org/a", isArchived: false, defaultBranchRef: { name: "main" } },
+    number: 1,
+    title: "T",
+    url: "https://github.com/org/a/pull/1",
+    isDraft: false,
+    state: "OPEN",
+    reviewDecision: "",
+    mergeable: "MERGEABLE",
+    mergeStateStatus: "CLEAN",
+    baseRefName: "main",
+    headRefName: "feat",
+    headRefOid: "abc123",
+    author: { login: "me" },
+    createdAt: "",
+    updatedAt: "",
+  };
+  const emptySearches = {
+    assignedIssues: { issueCount: 0, nodes: [] },
+    reviewRequestedPrs: { issueCount: 0, nodes: [] },
+    personalReviewRequests: { issueCount: 0, nodes: [] },
+  };
+
+  // Route each GraphQL request to a response based on its query text.
+  function stubByQuery(handler: (q: string) => { status?: number; body?: unknown; emptyBody?: boolean }) {
+    globalThis.fetch = ((_url: string, init?: RequestInit) => {
+      const q = (JSON.parse(String(init?.body ?? "{}")) as { query?: string }).query ?? "";
+      queries.push(q);
+      const r = handler(q);
+      const status = r.status ?? 200;
+      const text = r.emptyBody ? "" : JSON.stringify(r.body ?? {});
+      return Promise.resolve({
+        ok: status >= 200 && status < 300,
+        status,
+        headers: new Headers(),
+        json: () => Promise.resolve(r.body ?? {}),
+        text: () => Promise.resolve(text),
+      } as Response);
+    }) as typeof fetch;
+  }
+
+  test("falls back to split requests when the combined query times out, and stays split", async () => {
+    stubByQuery((q) => {
+      const hasSearch = q.includes("assignedIssues");
+      const hasPr = q.includes("pullRequests") || q.includes("prs: search");
+      if (hasSearch && hasPr) return { emptyBody: true }; // combined → server-side timeout
+      if (q.includes("object(oid:")) {
+        return { body: { data: { c0: { object: { statusCheckRollup: { contexts: { pageInfo: { hasNextPage: false }, nodes: [] } } } } } } };
+      }
+      if (hasSearch) return { body: { data: emptySearches } };
+      return { body: { data: { viewer: { pullRequests: { nodes: [samplePrNode] } } } } };
+    });
+
+    const client = new RealDashboardGitHubClient();
+    const wl = await client.fetchViewerWorkload();
+    expect(wl.prs.map((p) => p.number)).toEqual([1]);
+    // First request was the combined one (PRs + rollup + searches together).
+    expect(queries[0]).toContain("statusCheckRollup");
+    expect(queries[0]).toContain("assignedIssues");
+
+    // A second refresh skips the combined query entirely.
+    queries = [];
+    const wl2 = await client.fetchViewerWorkload();
+    expect(wl2.prs.map((p) => p.number)).toEqual([1]);
+    const triedCombinedAgain = queries.some((q) => q.includes("statusCheckRollup") && q.includes("assignedIssues"));
+    expect(triedCombinedAgain).toBe(false);
+  });
+
+  test("scopes the PR search and the search feeds to the configured repos", async () => {
+    stubByQuery(() => ({ body: { data: { prs: { nodes: [samplePrNode] }, ...emptySearches } } }));
+
+    const client = new RealDashboardGitHubClient({ scopeRepos: ["org/a", "org/b"] });
+    const wl = await client.fetchViewerWorkload();
+    expect(wl.prs.map((p) => p.number)).toEqual([1]);
+
+    const q = queries[0]!;
+    expect(q).toContain("prs: search(");
+    expect(q).toContain("author:@me is:pr is:open archived:false repo:org/a repo:org/b");
+    expect(q).toContain("assignee:@me is:issue is:open archived:false repo:org/a repo:org/b");
+    expect(q).toContain("review-requested:@me is:pr is:open archived:false repo:org/a repo:org/b");
+    // Scoped mode sources PRs from a search, not the unscoped viewer connection.
+    expect(q).not.toContain("pullRequests(first: 50");
+  });
+});
+
 describe("rateLimitDelayMs", () => {
   const reset = (secsFromNow: number, now: number) => String(Math.floor(now / 1000) + secsFromNow);
 

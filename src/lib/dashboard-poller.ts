@@ -62,6 +62,12 @@ export interface DashboardPollerOpts {
    * PRs against them. Shown in declared order ahead of PR-discovered repos.
    */
   pinnedRepos?: string[];
+  /**
+   * When non-empty, the viewer's PRs / assigned issues / review requests are
+   * scoped to only these repos (server-side). Passed through to the GitHub
+   * client. Ignored when a custom `github` client is supplied.
+   */
+  scopeRepos?: string[];
 }
 
 interface CiTarget {
@@ -101,7 +107,7 @@ export class DashboardPoller {
   private ciTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: DashboardPollerOpts) {
-    this.github = opts.github ?? new RealDashboardGitHubClient();
+    this.github = opts.github ?? new RealDashboardGitHubClient({ scopeRepos: opts.scopeRepos ?? [] });
     this.circle = opts.circle ?? new RealCircleCiClient();
     this.onSnapshot = opts.onSnapshot;
     this.log = opts.logger ?? (() => {});

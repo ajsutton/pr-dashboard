@@ -63,10 +63,24 @@ const DASHBOARD_REPOS = (process.env.DASHBOARD_REPOS ?? "")
   .map((s) => s.trim())
   .filter(Boolean);
 
+// When DASHBOARD_REPOS is set, scope all feeds to just those repos by default;
+// DASHBOARD_ALL_REPOS=1 restores the old behaviour (pin the repos but still
+// show the viewer's PRs/issues/reviews everywhere).
+const ALL_REPOS = process.env.DASHBOARD_ALL_REPOS === "1" || process.env.DASHBOARD_ALL_REPOS === "true";
+const scopeRepos = !ALL_REPOS ? DASHBOARD_REPOS : [];
+if (DASHBOARD_REPOS.length > 0) {
+  console.log(
+    scopeRepos.length > 0
+      ? `[dashboard] scoping to repos: ${scopeRepos.join(", ")}`
+      : `[dashboard] pinning repos (DASHBOARD_ALL_REPOS set): ${DASHBOARD_REPOS.join(", ")}`,
+  );
+}
+
 const dashboardPoller = new DashboardPoller({
   onSnapshot: (snap) => broadcast({ type: "dashboard-snapshot", data: snap }),
   logger: (msg) => console.log(`[dashboard] ${msg}`),
   pinnedRepos: DASHBOARD_REPOS,
+  scopeRepos,
 });
 void dashboardPoller.start().catch((err) => console.error("[dashboard] start failed:", err));
 

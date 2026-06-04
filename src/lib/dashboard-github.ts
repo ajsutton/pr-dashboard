@@ -295,6 +295,67 @@ const CONTEXT_NODE_FIELDS = `
 `;
 
 /**
+ * Every PR-node field the dashboard needs except the check rollup. Shared by
+ * the combined and split workload queries, and by both the `viewer` and the
+ * repo-scoped `search` PR sources, so the parser (`normalizePr`) sees the same
+ * shape regardless of how the PRs were fetched.
+ */
+const PR_CORE_FIELDS = `
+  repository { nameWithOwner isArchived defaultBranchRef { name } }
+  number
+  title
+  url
+  isDraft
+  state
+  reviewDecision
+  mergeable
+  mergeStateStatus
+  mergeQueueEntry { id }
+  autoMergeRequest { enabledAt }
+  baseRefName
+  headRefName
+  headRefOid
+  author { login }
+  createdAt
+  updatedAt
+  reviews(last: 50) { nodes { author { login } state submittedAt } }
+  reviewRequests(first: 20) {
+    nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } }
+  }
+  baseRef {
+    associatedPullRequests(first: 20, states: [OPEN, MERGED], orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes { number state headRefName repository { nameWithOwner } }
+    }
+  }
+`;
+
+/**
+ * The check-rollup sub-selection. Inlined into the combined query (one
+ * round-trip); fetched separately per commit in split mode, where it's the
+ * expensive part that pushes the combined query past GitHub's execution limit.
+ */
+const PR_ROLLUP_FIELD = `
+  statusCheckRollup: commits(last: 1) {
+    nodes {
+      commit {
+        oid
+        statusCheckRollup {
+          contexts(first: ${CONTEXTS_PAGE_SIZE}) {
+            pageInfo { hasNextPage endCursor }
+            nodes { ${CONTEXT_NODE_FIELDS} }
+          }
+        }
+      }
+    }
+  }
+`;
+
+/** `repo:a/b repo:c/d` qualifier appended to scoped searches. */
+function repoQualifier(repos: string[]): string {
+  return repos.map((r) => `repo:${r}`).join(" ");
+}
+
+/**
  * Page through `statusCheckRollup.contexts` for a specific commit, starting
  * after the cursor returned by an earlier query. Busy repos (eg.
  * ethereum-optimism/optimism) routinely exceed 100 contexts per commit, so
@@ -336,6 +397,57 @@ async function fetchRemainingCommitContexts(
     if (!pageInfo?.["hasNextPage"]) break;
     after = (pageInfo["endCursor"] as string) || undefined;
   }
+  return out;
+}
+
+/**
+ * Fetch check rollups for a batch of commits in a single request using aliased
+ * `repository(...).object(oid)` selections, then page out any commit with more
+ * than one context page. Used by split-mode workload fetching, where the
+ * rollups are pulled separately from the (cheap) PR-list query. Returns a map
+ * keyed by commit oid.
+ */
+async function fetchContextsForCommits(
+  commits: { owner: string; name: string; oid: string }[],
+): Promise<Map<string, RawCheckContext[]>> {
+  const out = new Map<string, RawCheckContext[]>();
+  if (commits.length === 0) return out;
+  const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const fields = commits.map(
+    (c, i) => `c${i}: repository(owner: "${esc(c.owner)}", name: "${esc(c.name)}") {
+      object(oid: "${esc(c.oid)}") {
+        ... on Commit {
+          statusCheckRollup {
+            contexts(first: ${CONTEXTS_PAGE_SIZE}) {
+              pageInfo { hasNextPage endCursor }
+              nodes { ${CONTEXT_NODE_FIELDS} }
+            }
+          }
+        }
+      }
+    }`,
+  );
+  const data = await ghGraphql(`query { ${fields.join(" ")} }`);
+  const followups: Array<{ owner: string; name: string; oid: string; cursor: string; into: RawCheckContext[] }> = [];
+  commits.forEach((c, i) => {
+    const repoNode = data?.[`c${i}`] as Record<string, unknown> | undefined;
+    const commit = repoNode?.["object"] as Record<string, unknown> | undefined;
+    const rollup = commit?.["statusCheckRollup"] as Record<string, unknown> | undefined;
+    const contexts = rollup?.["contexts"] as Record<string, unknown> | undefined;
+    const arr = parseContexts(contexts?.["nodes"]);
+    out.set(c.oid, arr);
+    const pageInfo = contexts?.["pageInfo"] as Record<string, unknown> | undefined;
+    if (pageInfo?.["hasNextPage"]) {
+      const cursor = (pageInfo["endCursor"] as string) || "";
+      if (cursor) followups.push({ owner: c.owner, name: c.name, oid: c.oid, cursor, into: arr });
+    }
+  });
+  await Promise.all(
+    followups.map(async (f) => {
+      const more = await fetchRemainingCommitContexts(f.owner, f.name, f.oid, f.cursor);
+      f.into.push(...more);
+    }),
+  );
   return out;
 }
 
@@ -453,6 +565,25 @@ function parseContexts(nodes: unknown): RawCheckContext[] {
 }
 
 export class RealDashboardGitHubClient implements DashboardGitHubClient {
+  /**
+   * When non-empty, the workload feeds are scoped to these repos server-side
+   * (`repo:` qualifiers) and the user's PRs come from a scoped `author:@me`
+   * search instead of the unscoped `viewer.pullRequests`.
+   */
+  private readonly scopeRepos: string[];
+
+  /**
+   * Flipped on once the single combined workload query times out (GitHub's
+   * ~10s GraphQL budget). Stays set for the process lifetime so subsequent
+   * refreshes go straight to the cheaper split requests; a restart resets it,
+   * retrying the combined query in case the workload has since shrunk.
+   */
+  private splitWorkload = false;
+
+  constructor(opts: { scopeRepos?: string[] } = {}) {
+    this.scopeRepos = opts.scopeRepos ?? [];
+  }
+
   async fetchViewer(): Promise<{ login: string }> {
     const data = await ghGraphql(`query { viewer { login } }`);
     const login = ((data?.["viewer"] as Record<string, unknown> | undefined)?.["login"] as string) ?? "";
@@ -500,127 +631,89 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
   }
 
   async fetchViewerWorkload(): Promise<ViewerWorkload> {
-    const query = `
-      query {
-        viewer {
-          pullRequests(first: 50, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
-            nodes {
-              repository {
-                nameWithOwner
-                isArchived
-                defaultBranchRef { name }
-              }
-              number
-              title
-              url
-              isDraft
-              state
-              reviewDecision
-              mergeable
-              mergeStateStatus
-              mergeQueueEntry { id }
-              autoMergeRequest { enabledAt }
-              baseRefName
-              headRefName
-              headRefOid
-              author { login }
-              createdAt
-              updatedAt
-              reviews(last: 50) { nodes { author { login } state submittedAt } }
-              reviewRequests(first: 20) {
-                nodes {
-                  requestedReviewer {
-                    __typename
-                    ... on User { login }
-                    ... on Team { name }
-                  }
-                }
-              }
-              baseRef {
-                associatedPullRequests(first: 20, states: [OPEN, MERGED], orderBy: {field: UPDATED_AT, direction: DESC}) {
-                  nodes { number state headRefName repository { nameWithOwner } }
-                }
-              }
-              statusCheckRollup: commits(last: 1) {
-                nodes {
-                  commit {
-                    oid
-                    statusCheckRollup {
-                      contexts(first: ${CONTEXTS_PAGE_SIZE}) {
-                        pageInfo { hasNextPage endCursor }
-                        nodes { ${CONTEXT_NODE_FIELDS} }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-        assignedIssues: search(query: "assignee:@me is:issue is:open archived:false", first: 100, type: ISSUE) {
-          issueCount
-          nodes {
-            ... on Issue {
-              number
-              title
-              url
-              createdAt
-              updatedAt
-              repository { nameWithOwner }
-            }
-          }
-        }
-        reviewRequestedPrs: search(query: "review-requested:@me is:pr is:open archived:false", first: 100, type: ISSUE) {
-          issueCount
-          nodes {
-            ... on PullRequest {
-              number
-              title
-              url
-              createdAt
-              updatedAt
-              repository { nameWithOwner }
-              reviewRequests(first: 20) {
-                nodes {
-                  requestedReviewer {
-                    __typename
-                    ... on User { login }
-                    ... on Team { name }
-                  }
-                }
-              }
-            }
-          }
-        }
-        personalReviewRequests: search(query: "user-review-requested:@me is:pr is:open archived:false", first: 100, type: ISSUE) {
-          issueCount
-          nodes {
-            ... on PullRequest {
-              number
-              title
-              url
-              createdAt
-              updatedAt
-              repository { nameWithOwner }
+    if (!this.splitWorkload) {
+      const combined = await this.fetchWorkloadCombined();
+      if (combined) return combined;
+      this.splitWorkload = true;
+      debugLog(
+        "github",
+        "combined workload query returned no PR list (likely over GitHub's GraphQL budget); using split requests for the rest of this process",
+      );
+    }
+    return this.fetchWorkloadSplit();
+  }
+
+  /** PR source selection — repo-scoped `author:@me` search when scoping, else `viewer.pullRequests`. */
+  private prListBlock(withRollup: boolean): string {
+    const rollup = withRollup ? PR_ROLLUP_FIELD : "";
+    if (this.scopeRepos.length > 0) {
+      const q = `author:@me is:pr is:open archived:false ${repoQualifier(this.scopeRepos)}`;
+      return `prs: search(query: "${q}", first: 50, type: ISSUE) {
+        nodes { ... on PullRequest { ${PR_CORE_FIELDS} ${rollup} } }
+      }`;
+    }
+    return `viewer {
+      pullRequests(first: 50, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
+        nodes { ${PR_CORE_FIELDS} ${rollup} }
+      }
+    }`;
+  }
+
+  /** The three workload-search feeds, repo-scoped when scoping is active. */
+  private searchesBlock(): string {
+    const rq = this.scopeRepos.length > 0 ? ` ${repoQualifier(this.scopeRepos)}` : "";
+    return `
+      assignedIssues: search(query: "assignee:@me is:issue is:open archived:false${rq}", first: 100, type: ISSUE) {
+        issueCount
+        nodes { ... on Issue { number title url createdAt updatedAt repository { nameWithOwner } } }
+      }
+      reviewRequestedPrs: search(query: "review-requested:@me is:pr is:open archived:false${rq}", first: 100, type: ISSUE) {
+        issueCount
+        nodes {
+          ... on PullRequest {
+            number title url createdAt updatedAt repository { nameWithOwner }
+            reviewRequests(first: 20) {
+              nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } }
             }
           }
         }
       }
+      personalReviewRequests: search(query: "user-review-requested:@me is:pr is:open archived:false${rq}", first: 100, type: ISSUE) {
+        issueCount
+        nodes { ... on PullRequest { number title url createdAt updatedAt repository { nameWithOwner } } }
+      }
     `;
-    const data = await ghGraphql(query);
-    const viewer = data?.["viewer"] as Record<string, unknown> | undefined;
-    // A valid token always resolves a `viewer`. A null/missing one means the
-    // call actually failed — either an HTTP error (ghGraphql returned no data)
-    // or a partial GraphQL error where GitHub answers HTTP 200 with
-    // `{ data: { viewer: null, ... }, errors: [...] }` (common when a busy
-    // repo's statusCheckRollup times out). Falling through would report "0 open
-    // PRs" and wipe the board; throw instead so the poller keeps the last good
-    // snapshot.
-    if (!viewer) {
-      throw new Error("fetchViewerWorkload: GitHub returned no viewer (HTTP or partial GraphQL error)");
+  }
+
+  /**
+   * Pull the PR nodes out of a workload response. Returns undefined when the PR
+   * container itself is missing/null — the signal that the query failed (HTTP
+   * error, empty body, or a partial GraphQL timeout) rather than legitimately
+   * returning zero PRs (which is an empty `nodes` array).
+   */
+  private extractPrNodes(data: Record<string, unknown> | undefined): Array<Record<string, unknown>> | undefined {
+    if (!data) return undefined;
+    if (this.scopeRepos.length > 0) {
+      const prs = data["prs"] as Record<string, unknown> | undefined;
+      if (!prs) return undefined;
+      return (prs["nodes"] as Array<Record<string, unknown>>) ?? [];
     }
-    const prsNode = viewer?.["pullRequests"] as Record<string, unknown> | undefined;
-    const nodes = (prsNode?.["nodes"] as Array<Record<string, unknown>>) ?? [];
+    const viewer = data["viewer"] as Record<string, unknown> | undefined;
+    if (!viewer) return undefined;
+    const prsNode = viewer["pullRequests"] as Record<string, unknown> | undefined;
+    if (!prsNode) return undefined;
+    return (prsNode["nodes"] as Array<Record<string, unknown>>) ?? [];
+  }
+
+  /**
+   * One round-trip: PR list (with inline check rollups) plus the three search
+   * feeds. Returns undefined — rather than throwing — when the PR container is
+   * missing, so the caller can fall back to the split requests.
+   */
+  private async fetchWorkloadCombined(): Promise<ViewerWorkload | undefined> {
+    const data = await ghGraphql(`query { ${this.prListBlock(true)} ${this.searchesBlock()} }`);
+    const nodes = this.extractPrNodes(data);
+    if (!nodes) return undefined;
 
     const raws: RawPr[] = [];
     const followups: Array<{ raw: RawPr; owner: string; name: string; oid: string; cursor: string }> = [];
@@ -638,8 +731,53 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
         f.raw.checks.push(...more);
       }),
     );
+    return this.assembleWorkload(raws, data!);
+  }
 
-    const assignedIssuesNode = (data?.["assignedIssues"] as Record<string, unknown> | undefined) ?? {};
+  /**
+   * Cheaper fallback: the PR list (no rollups) and the searches run as two
+   * parallel requests — each well under GitHub's budget — then the check
+   * rollups are batched into one more request. Throws when the PR list itself
+   * fails so the poller keeps its last good snapshot.
+   */
+  private async fetchWorkloadSplit(): Promise<ViewerWorkload> {
+    const [prData, searchData] = await Promise.all([
+      ghGraphql(`query { ${this.prListBlock(false)} }`),
+      ghGraphql(`query { ${this.searchesBlock()} }`),
+    ]);
+    const nodes = this.extractPrNodes(prData);
+    if (!nodes) {
+      throw new Error("fetchViewerWorkload(split): GitHub returned no PR list (HTTP or GraphQL error)");
+    }
+    const raws: RawPr[] = [];
+    for (const n of nodes) {
+      const repoNode = n["repository"] as Record<string, unknown> | undefined;
+      if (repoNode?.["isArchived"]) continue;
+      raws.push(normalizePr(n));
+    }
+    await this.attachChecks(raws);
+    return this.assembleWorkload(raws, searchData ?? {});
+  }
+
+  /** Fetch + attach check rollups for each PR's head commit (split mode). */
+  private async attachChecks(raws: RawPr[]): Promise<void> {
+    const commits = raws
+      .filter((r) => r.headRefOid && r.repo.includes("/"))
+      .map((r) => {
+        const [owner, name] = r.repo.split("/");
+        return { owner: owner!, name: name!, oid: r.headRefOid };
+      });
+    if (commits.length === 0) return;
+    const byOid = await fetchContextsForCommits(commits);
+    for (const r of raws) {
+      const checks = byOid.get(r.headRefOid);
+      if (checks) r.checks.push(...checks);
+    }
+  }
+
+  /** Assemble the ViewerWorkload from parsed PRs + the raw search response. */
+  private assembleWorkload(raws: RawPr[], data: Record<string, unknown>): ViewerWorkload {
+    const assignedIssuesNode = (data["assignedIssues"] as Record<string, unknown> | undefined) ?? {};
     const assignedIssues: RawStatItem[] = [];
     const issueNodes = assignedIssuesNode["nodes"];
     if (Array.isArray(issueNodes)) {
@@ -651,7 +789,7 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
     const assignedIssuesTotalCount =
       typeof assignedIssuesNode["issueCount"] === "number" ? (assignedIssuesNode["issueCount"] as number) : assignedIssues.length;
 
-    const reviewReqNode = (data?.["reviewRequestedPrs"] as Record<string, unknown> | undefined) ?? {};
+    const reviewReqNode = (data["reviewRequestedPrs"] as Record<string, unknown> | undefined) ?? {};
     const reviewRequestedPrs: RawReviewRequestItem[] = [];
     const reqNodes = reviewReqNode["nodes"];
     if (Array.isArray(reqNodes)) {
@@ -663,7 +801,7 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
     const reviewRequestedPrsTotalCount =
       typeof reviewReqNode["issueCount"] === "number" ? (reviewReqNode["issueCount"] as number) : reviewRequestedPrs.length;
 
-    const personalReviewNode = (data?.["personalReviewRequests"] as Record<string, unknown> | undefined) ?? {};
+    const personalReviewNode = (data["personalReviewRequests"] as Record<string, unknown> | undefined) ?? {};
     const personalReviewRequestedPrs: RawStatItem[] = [];
     const personalNodes = personalReviewNode["nodes"];
     if (Array.isArray(personalNodes)) {
@@ -906,7 +1044,10 @@ function normalizePr(n: Record<string, unknown>): RawPr {
     autoMergeEnabled: n["autoMergeRequest"] != null,
     baseRefName: (n["baseRefName"] as string) ?? "",
     headRefName: (n["headRefName"] as string) ?? "",
-    headRefOid: (commit?.["oid"] as string) ?? "",
+    // Top-level `headRefOid` is always present; the rollup commit oid is only
+    // available in combined mode. Prefer the field so split mode (no inline
+    // rollup) still gets the head SHA.
+    headRefOid: (n["headRefOid"] as string) || (commit?.["oid"] as string) || "",
     author: ((n["author"] as Record<string, unknown> | undefined)?.["login"] as string) ?? "",
     createdAt: (n["createdAt"] as string) ?? "",
     updatedAt: (n["updatedAt"] as string) ?? "",

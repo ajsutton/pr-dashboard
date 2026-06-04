@@ -25,7 +25,8 @@ Open `http://127.0.0.1:3456`.
 | `DASHBOARD_PORT` | `3456` | listen port |
 | `DASHBOARD_HOST` | `0.0.0.0` | listen host |
 | `BASE_PATH` | `/` | subpath prefix for reverse-proxy hosting |
-| `DASHBOARD_REPOS` | (empty) | comma-separated `owner/repo` list to pin |
+| `DASHBOARD_REPOS` | (empty) | comma-separated `owner/repo` list. When set, the dashboard scopes everything (your PRs, assigned issues, review requests) to just these repos. When empty, your PRs everywhere are shown. |
+| `DASHBOARD_ALL_REPOS` | (off) | set to `1` to keep showing your PRs/issues/reviews across **all** repos even when `DASHBOARD_REPOS` is set — the listed repos are then just pinned, not a filter. |
 | `GH_TOKEN` | (required) | GitHub PAT or `gh auth token` |
 | `CITOKEN` | (optional) | CircleCI personal API token — needed to read private CircleCI projects and to lift the per-IP rate limit |
 | `DASHBOARD_DEBUG` | (off) | set to `1` (or pass `--debug`) to trace every GitHub + CircleCI request/response — incl. partial GraphQL `errors` — to the logs. Use to diagnose an empty/blank board. Verbose. |
