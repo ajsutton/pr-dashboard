@@ -350,11 +350,6 @@ const PR_ROLLUP_FIELD = `
   }
 `;
 
-/** `repo:a/b repo:c/d` qualifier appended to scoped searches. */
-function repoQualifier(repos: string[]): string {
-  return repos.map((r) => `repo:${r}`).join(" ");
-}
-
 /**
  * Page through `statusCheckRollup.contexts` for a specific commit, starting
  * after the cursor returned by an earlier query. Busy repos (eg.
@@ -566,9 +561,10 @@ function parseContexts(nodes: unknown): RawCheckContext[] {
 
 export class RealDashboardGitHubClient implements DashboardGitHubClient {
   /**
-   * When non-empty, the workload feeds are scoped to these repos server-side
-   * (`repo:` qualifiers) and the user's PRs come from a scoped `author:@me`
-   * search instead of the unscoped `viewer.pullRequests`.
+   * When non-empty, the workload feeds are filtered to these repos after
+   * fetching (client-side — see `scopeWorkload`). Filtering happens client-side
+   * rather than via `repo:` search qualifiers because those return nothing for
+   * fine-grained PATs that weren't granted the target repo.
    */
   private readonly scopeRepos: string[];
 
@@ -631,6 +627,10 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
   }
 
   async fetchViewerWorkload(): Promise<ViewerWorkload> {
+    return this.scopeWorkload(await this.fetchWorkloadRaw());
+  }
+
+  private async fetchWorkloadRaw(): Promise<ViewerWorkload> {
     if (!this.splitWorkload) {
       const combined = await this.fetchWorkloadCombined();
       if (combined) return combined;
@@ -643,15 +643,14 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
     return this.fetchWorkloadSplit();
   }
 
-  /** PR source selection — repo-scoped `author:@me` search when scoping, else `viewer.pullRequests`. */
+  /**
+   * The viewer's open PRs. Always unscoped: a repo-scoped `search(repo:…)` would
+   * return nothing for fine-grained PATs that weren't granted the target repo
+   * (even public ones), whereas `viewer.pullRequests` works for every token
+   * type. Repo scoping is applied client-side afterwards (`scopeWorkload`).
+   */
   private prListBlock(withRollup: boolean): string {
     const rollup = withRollup ? PR_ROLLUP_FIELD : "";
-    if (this.scopeRepos.length > 0) {
-      const q = `author:@me is:pr is:open archived:false ${repoQualifier(this.scopeRepos)}`;
-      return `prs: search(query: "${q}", first: 50, type: ISSUE) {
-        nodes { ... on PullRequest { ${PR_CORE_FIELDS} ${rollup} } }
-      }`;
-    }
     return `viewer {
       pullRequests(first: 50, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
         nodes { ${PR_CORE_FIELDS} ${rollup} }
@@ -659,15 +658,14 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
     }`;
   }
 
-  /** The three workload-search feeds, repo-scoped when scoping is active. */
+  /** The three workload-search feeds. Unscoped for the same fine-grained-PAT reason as `prListBlock`. */
   private searchesBlock(): string {
-    const rq = this.scopeRepos.length > 0 ? ` ${repoQualifier(this.scopeRepos)}` : "";
     return `
-      assignedIssues: search(query: "assignee:@me is:issue is:open archived:false${rq}", first: 100, type: ISSUE) {
+      assignedIssues: search(query: "assignee:@me is:issue is:open archived:false", first: 100, type: ISSUE) {
         issueCount
         nodes { ... on Issue { number title url createdAt updatedAt repository { nameWithOwner } } }
       }
-      reviewRequestedPrs: search(query: "review-requested:@me is:pr is:open archived:false${rq}", first: 100, type: ISSUE) {
+      reviewRequestedPrs: search(query: "review-requested:@me is:pr is:open archived:false", first: 100, type: ISSUE) {
         issueCount
         nodes {
           ... on PullRequest {
@@ -678,7 +676,7 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
           }
         }
       }
-      personalReviewRequests: search(query: "user-review-requested:@me is:pr is:open archived:false${rq}", first: 100, type: ISSUE) {
+      personalReviewRequests: search(query: "user-review-requested:@me is:pr is:open archived:false", first: 100, type: ISSUE) {
         issueCount
         nodes { ... on PullRequest { number title url createdAt updatedAt repository { nameWithOwner } } }
       }
@@ -693,16 +691,33 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
    */
   private extractPrNodes(data: Record<string, unknown> | undefined): Array<Record<string, unknown>> | undefined {
     if (!data) return undefined;
-    if (this.scopeRepos.length > 0) {
-      const prs = data["prs"] as Record<string, unknown> | undefined;
-      if (!prs) return undefined;
-      return (prs["nodes"] as Array<Record<string, unknown>>) ?? [];
-    }
     const viewer = data["viewer"] as Record<string, unknown> | undefined;
     if (!viewer) return undefined;
     const prsNode = viewer["pullRequests"] as Record<string, unknown> | undefined;
     if (!prsNode) return undefined;
     return (prsNode["nodes"] as Array<Record<string, unknown>>) ?? [];
+  }
+
+  /**
+   * Drop everything outside `scopeRepos`. No-op when scoping is off. Counts are
+   * recomputed from the filtered sets so the stats cards match what's shown.
+   */
+  private scopeWorkload(wl: ViewerWorkload): ViewerWorkload {
+    if (this.scopeRepos.length === 0) return wl;
+    const inScope = new Set(this.scopeRepos);
+    const prs = wl.prs.filter((p) => inScope.has(p.repo));
+    const assignedIssues = wl.assignedIssues.filter((i) => inScope.has(i.repo));
+    const reviewRequestedPrs = wl.reviewRequestedPrs.filter((p) => inScope.has(p.repo));
+    const personalReviewRequestedPrs = wl.personalReviewRequestedPrs.filter((p) => inScope.has(p.repo));
+    return {
+      prs,
+      assignedIssues,
+      assignedIssuesTotalCount: assignedIssues.length,
+      reviewRequestedPrs,
+      reviewRequestedPrsTotalCount: reviewRequestedPrs.length,
+      personalReviewRequestedPrs,
+      personalReviewRequestsTotalCount: personalReviewRequestedPrs.length,
+    };
   }
 
   /**

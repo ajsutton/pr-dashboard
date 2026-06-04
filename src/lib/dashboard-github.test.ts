@@ -429,20 +429,31 @@ describe("fetchViewerWorkload (adaptive combined→split + repo scoping)", () =>
     expect(triedCombinedAgain).toBe(false);
   });
 
-  test("scopes the PR search and the search feeds to the configured repos", async () => {
-    stubByQuery(() => ({ body: { data: { prs: { nodes: [samplePrNode] }, ...emptySearches } } }));
+  test("filters results to the configured repos client-side, leaving the queries unscoped", async () => {
+    const inScope = { ...samplePrNode, number: 1, repository: { ...samplePrNode.repository, nameWithOwner: "org/a" } };
+    const outScope = { ...samplePrNode, number: 2, repository: { ...samplePrNode.repository, nameWithOwner: "org/other" } };
+    const issue = (n: number, repo: string) => ({ number: n, title: "i", url: "", createdAt: "", updatedAt: "", repository: { nameWithOwner: repo } });
+    stubByQuery(() => ({
+      body: {
+        data: {
+          viewer: { pullRequests: { nodes: [inScope, outScope] } },
+          assignedIssues: { issueCount: 9, nodes: [issue(10, "org/a"), issue(11, "org/other")] },
+          reviewRequestedPrs: { issueCount: 0, nodes: [] },
+          personalReviewRequests: { issueCount: 0, nodes: [] },
+        },
+      },
+    }));
 
-    const client = new RealDashboardGitHubClient({ scopeRepos: ["org/a", "org/b"] });
+    const client = new RealDashboardGitHubClient({ scopeRepos: ["org/a"] });
     const wl = await client.fetchViewerWorkload();
-    expect(wl.prs.map((p) => p.number)).toEqual([1]);
 
-    const q = queries[0]!;
-    expect(q).toContain("prs: search(");
-    expect(q).toContain("author:@me is:pr is:open archived:false repo:org/a repo:org/b");
-    expect(q).toContain("assignee:@me is:issue is:open archived:false repo:org/a repo:org/b");
-    expect(q).toContain("review-requested:@me is:pr is:open archived:false repo:org/a repo:org/b");
-    // Scoped mode sources PRs from a search, not the unscoped viewer connection.
-    expect(q).not.toContain("pullRequests(first: 50");
+    expect(wl.prs.map((p) => `${p.repo}#${p.number}`)).toEqual(["org/a#1"]);
+    expect(wl.assignedIssues.map((i) => i.repo)).toEqual(["org/a"]);
+    // Counts are recomputed from the filtered set, not GitHub's unscoped total.
+    expect(wl.assignedIssuesTotalCount).toBe(1);
+    // The query itself is unscoped (works for fine-grained PATs); no repo: qualifier.
+    expect(queries[0]).not.toContain("repo:org/a");
+    expect(queries[0]).toContain("pullRequests(first: 50");
   });
 });
 
