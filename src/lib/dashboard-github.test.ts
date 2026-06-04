@@ -208,6 +208,7 @@ describe("ghRest / ghGraphql (direct GitHub REST/GraphQL over fetch)", () => {
       status,
       headers: new Headers(r.headers ?? {}),
       json: () => Promise.resolve(r.body ?? {}),
+      text: () => Promise.resolve(JSON.stringify(r.body ?? {})),
     } as Response;
   }
   function stubFetch(r: FakeRes) {
@@ -302,6 +303,7 @@ describe("RealDashboardGitHubClient.fetchViewerWorkload (failure handling)", () 
         status,
         headers: new Headers(),
         json: () => Promise.resolve(body),
+        text: () => Promise.resolve(JSON.stringify(body)),
       } as Response)) as typeof fetch;
   }
 

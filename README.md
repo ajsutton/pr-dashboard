@@ -28,6 +28,7 @@ Open `http://127.0.0.1:3456`.
 | `DASHBOARD_REPOS` | (empty) | comma-separated `owner/repo` list to pin |
 | `GH_TOKEN` | (required) | GitHub PAT or `gh auth token` |
 | `CITOKEN` | (optional) | CircleCI personal API token — needed to read private CircleCI projects and to lift the per-IP rate limit |
+| `DASHBOARD_DEBUG` | (off) | set to `1` (or pass `--debug`) to trace every GitHub + CircleCI request/response — incl. partial GraphQL `errors` — to the logs. Use to diagnose an empty/blank board. Verbose. |
 
 ## Docker
 

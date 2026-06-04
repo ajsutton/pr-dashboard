@@ -6,6 +6,7 @@
  */
 
 import type { CiJobStatus, CiPipelineStatus, CiWorkflowStatus } from "../types.ts";
+import { debugLog, truncateBody } from "./debug.ts";
 
 const BASE = "https://circleci.com/api/v2";
 
@@ -137,11 +138,17 @@ export class RealCircleCiClient implements CircleCiClient {
   }
 
   private async get<T>(pathWithQuery: string): Promise<T | undefined> {
+    const started = Date.now();
+    const authed = this.headers["Circle-Token"] ? "authed" : "anon";
+    debugLog("circleci", `request GET ${pathWithQuery} (${authed})`);
     try {
       const res = await fetch(`${BASE}${pathWithQuery}`, { headers: this.headers });
+      const text = await res.text().catch(() => "");
+      debugLog("circleci", `GET ${pathWithQuery} → HTTP ${res.status} in ${Date.now() - started}ms: ${truncateBody(text)}`);
       if (!res.ok) return undefined;
-      return (await res.json()) as T;
-    } catch {
+      return JSON.parse(text) as T;
+    } catch (err) {
+      debugLog("circleci", `GET ${pathWithQuery} → error: ${String(err)}`);
       return undefined;
     }
   }

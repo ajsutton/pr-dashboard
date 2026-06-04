@@ -5,6 +5,7 @@
  */
 
 import type { PrCard, MergeQueueEntry } from "../types.ts";
+import { debugLog, summarizeQuery, truncateBody } from "./debug.ts";
 
 export interface RawCheckContext {
   __typename: "CheckRun" | "StatusContext" | string;
@@ -229,10 +230,18 @@ async function githubFetch(url: string, init?: RequestInit): Promise<Response | 
 
 /** Exported for unit tests. */
 export async function ghRest(path: string): Promise<unknown> {
+  const started = Date.now();
+  debugLog("github", `REST request GET ${path}`);
   const res = await githubFetch(`${GITHUB_API}${path}`, { headers: ghHeaders() });
-  if (!res?.ok) return undefined;
+  if (!res) {
+    debugLog("github", `REST GET ${path} → no response (network error)`);
+    return undefined;
+  }
+  const text = await res.text().catch(() => "");
+  debugLog("github", `REST GET ${path} → HTTP ${res.status} in ${Date.now() - started}ms: ${truncateBody(text)}`);
+  if (!res.ok) return undefined;
   try {
-    return await res.json();
+    return JSON.parse(text);
   } catch {
     return undefined;
   }
@@ -240,14 +249,29 @@ export async function ghRest(path: string): Promise<unknown> {
 
 /** Exported for unit tests. */
 export async function ghGraphql(query: string, vars: Record<string, unknown> = {}): Promise<Record<string, unknown> | undefined> {
+  const started = Date.now();
+  debugLog("github", `GraphQL request ${summarizeQuery(query)} vars=${JSON.stringify(vars)}`);
   const res = await githubFetch(`${GITHUB_API}/graphql`, {
     method: "POST",
     headers: { ...ghHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify({ query, variables: vars }),
   });
-  if (!res?.ok) return undefined;
+  if (!res) {
+    debugLog("github", "GraphQL request → no response (network error)");
+    return undefined;
+  }
+  const text = await res.text().catch(() => "");
+  debugLog("github", `GraphQL response HTTP ${res.status} in ${Date.now() - started}ms: ${truncateBody(text)}`);
+  if (!res.ok) return undefined;
   try {
-    const parsed = (await res.json()) as { data?: Record<string, unknown> };
+    const parsed = JSON.parse(text) as { data?: Record<string, unknown>; errors?: unknown };
+    // GitHub answers partial failures with HTTP 200 + a populated `errors`
+    // array (cost limit, field-level timeout, missing scope). The data we'd
+    // otherwise return has null holes, so surface the errors under debug —
+    // this is the usual cause of a "0 PRs / blank board" run.
+    if (parsed.errors && (Array.isArray(parsed.errors) ? parsed.errors.length > 0 : true)) {
+      debugLog("github", `GraphQL errors: ${JSON.stringify(parsed.errors)}`);
+    }
     return parsed.data;
   } catch {
     return undefined;

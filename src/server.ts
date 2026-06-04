@@ -2,7 +2,15 @@
 import path from "node:path";
 import { watch, readFileSync } from "node:fs";
 import { DashboardPoller } from "./lib/dashboard-poller.ts";
+import { setDebugEnabled } from "./lib/debug.ts";
 import type { WsMessage } from "./types.ts";
+
+const DEBUG =
+  process.argv.includes("--debug") ||
+  process.env.DASHBOARD_DEBUG === "1" ||
+  process.env.DASHBOARD_DEBUG === "true";
+setDebugEnabled(DEBUG);
+if (DEBUG) console.log("[debug] Request/response tracing enabled (GitHub + CircleCI)");
 
 const PORT = parseInt(process.env.DASHBOARD_PORT ?? "3456", 10);
 const HOST = process.env.DASHBOARD_HOST ?? "0.0.0.0";
