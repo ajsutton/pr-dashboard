@@ -8,8 +8,12 @@ if [ -f /run/secrets/ci_token ]; then
   CITOKEN=$(cat /run/secrets/ci_token); export CITOKEN
 fi
 
-if [ "$#" -gt 0 ]; then
-  exec "$@"
-else
+# A leading-flag arg (e.g. --debug) is meant for the server, not a command to
+# run instead of it. Anything else (a bare program name) replaces the command.
+if [ "$#" -eq 0 ]; then
   exec bun /app/src/server.ts
+elif [ "${1#-}" != "$1" ]; then
+  exec bun /app/src/server.ts "$@"
+else
+  exec "$@"
 fi
