@@ -111,6 +111,34 @@ body { min-height: 100vh; font-size: 16px; }
 .db-conn[data-state="closed"]     { background: var(--err);  color: var(--ink); }
 .db-user::before { content: "@"; opacity: 0.5; }
 
+/* Kermit perches on the top edge of the status pill when the whole board is
+ * green. The image is a sitting Kermit, so anchoring his base at the pill's
+ * top edge (sunk in a few px) reads as him sitting on it. pointer-events:none
+ * so he never blocks the controls he's resting on. */
+.db-kermit {
+  position: absolute;
+  bottom: calc(100% - 7px);
+  right: 16px;
+  height: 60px;
+  width: auto;
+  pointer-events: none;
+  filter: drop-shadow(0 3px 5px rgba(0, 0, 0, 0.45));
+  transform-origin: bottom center;
+  animation: db-kermit-hop 540ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  z-index: 1;
+}
+.db-kermit[hidden] { display: none; }
+
+@keyframes db-kermit-hop {
+  0%   { transform: translateY(12px) scale(0.55); opacity: 0; }
+  60%  { transform: translateY(-7px) scale(1.06); opacity: 1; }
+  100% { transform: translateY(0) scale(1); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .db-kermit { animation: none; }
+}
+
 .db-main {
   padding: 14px;
   display: flex;

@@ -20,8 +20,10 @@ import {
 } from "./testmode.js";
 import { pipelineActivity } from "./pipeline-activity.js";
 import { buildStatCards } from "./dashboard-stats.js";
+import { boardAllGreen } from "./board-green.js";
 
 const conn = document.getElementById("db-conn");
+const kermitEl = document.getElementById("db-kermit");
 const userEl = document.getElementById("db-user");
 const updatedEl = document.getElementById("db-updated");
 const queuesSection = document.getElementById("db-queues-section");
@@ -1071,7 +1073,19 @@ function render() {
   prevPrState = nextState;
   prevQueueState = nextQueueState;
   prevQueueRepos = nextQueueRepos;
+  updateKermit(snap);
   updateTimestamp();
+}
+
+/**
+ * Show Kermit perched on the status pill when the whole board is green,
+ * hide him otherwise. Toggled outside any view-transition so his CSS
+ * hop-in animation plays cleanly when he appears rather than being
+ * captured into the db-meta crossfade.
+ */
+function updateKermit(snap) {
+  if (!kermitEl) return;
+  kermitEl.hidden = !boardAllGreen(snap);
 }
 
 function clearLifecycleClasses() {

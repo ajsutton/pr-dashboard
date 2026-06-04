@@ -13,6 +13,9 @@
   </head>
   <body>
     <div id="db-meta" class="db-meta">
+      <!-- Perches on the top edge of the pill when the whole board is green;
+           hidden otherwise. Toggled by updateKermit() in dashboard.js. -->
+      <img id="db-kermit" class="db-kermit" src="kermit.png" alt="Kermit the Frog, relaxing because everything is green" hidden />
       <span id="db-user" class="db-user"></span>
       <span id="db-conn" class="db-conn" data-state="connecting">connecting…</span>
       <span id="db-updated" class="db-updated"></span>
