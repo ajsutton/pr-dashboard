@@ -4,11 +4,13 @@ services:
     # image: ghcr.io/ajsutton/pr-dashboard:latest
     container_name: pr-dashboard
     user: "${UID}:${GID}"
-    command: ["bun", "--watch", "/app/src/server.ts"]
     ports:
       - "${BIND_HOST:-127.0.0.1}:3456:3456"
     environment:
       DASHBOARD_REPOS: ${DASHBOARD_REPOS:-}
+      DASHBOARD_DEBUG: ${DASHBOARD_DEBUG:-}
+      # Compose runs from a checkout with ./src mounted — restart on changes.
+      DASHBOARD_WATCH: "1"
     volumes:
       - "./src:/app/src"
       - "./public:/app/public"

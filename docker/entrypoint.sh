@@ -8,12 +8,7 @@ if [ -f /run/secrets/ci_token ]; then
   CITOKEN=$(cat /run/secrets/ci_token); export CITOKEN
 fi
 
-# A leading-flag arg (e.g. --debug) is meant for the server, not a command to
-# run instead of it. Anything else (a bare program name) replaces the command.
-if [ "$#" -eq 0 ]; then
-  exec bun /app/src/server.ts
-elif [ "${1#-}" != "$1" ]; then
-  exec bun /app/src/server.ts "$@"
-else
-  exec "$@"
-fi
+# Args (e.g. --debug) are passed straight to the server. Use `docker run
+# --entrypoint …` if you need to run something other than the dashboard.
+# DASHBOARD_WATCH=1 (compose dev mode sets it) restarts on source changes.
+exec bun ${DASHBOARD_WATCH:+--watch} /app/src/server.ts "$@"
