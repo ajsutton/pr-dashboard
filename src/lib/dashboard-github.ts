@@ -585,6 +585,16 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
     `;
     const data = await ghGraphql(query);
     const viewer = data?.["viewer"] as Record<string, unknown> | undefined;
+    // A valid token always resolves a `viewer`. A null/missing one means the
+    // call actually failed — either an HTTP error (ghGraphql returned no data)
+    // or a partial GraphQL error where GitHub answers HTTP 200 with
+    // `{ data: { viewer: null, ... }, errors: [...] }` (common when a busy
+    // repo's statusCheckRollup times out). Falling through would report "0 open
+    // PRs" and wipe the board; throw instead so the poller keeps the last good
+    // snapshot.
+    if (!viewer) {
+      throw new Error("fetchViewerWorkload: GitHub returned no viewer (HTTP or partial GraphQL error)");
+    }
     const prsNode = viewer?.["pullRequests"] as Record<string, unknown> | undefined;
     const nodes = (prsNode?.["nodes"] as Array<Record<string, unknown>>) ?? [];
 

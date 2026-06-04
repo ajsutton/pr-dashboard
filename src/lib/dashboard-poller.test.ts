@@ -4,8 +4,17 @@ import {
   buildTotalsByRepo,
   dedupReposByCanonical,
   deriveGhOrigin,
+  DashboardPoller,
 } from "./dashboard-poller.ts";
-import type { RawReviewRequestItem, RawStatItem, RepoMeta } from "./dashboard-github.ts";
+import type {
+  DashboardGitHubClient,
+  RawPr,
+  RawReviewRequestItem,
+  RawStatItem,
+  RepoMeta,
+  ViewerWorkload,
+} from "./dashboard-github.ts";
+import type { DashboardSnapshot } from "../types.ts";
 
 function meta(canonical: string, openIssues = 0, openPrs = 0): RepoMeta {
   return { canonical, openIssues, openPrs };
@@ -212,5 +221,80 @@ describe("buildStats", () => {
       personalReviewRequestsTotalCount: 2,
     });
     expect(stats.personalReviewRequests.map((p) => p.number)).toEqual([11, 22]);
+  });
+});
+
+describe("DashboardPoller refresh resilience", () => {
+  function rawPr(number: number): RawPr {
+    return {
+      repo: "me/app",
+      number,
+      baseRefName: "main",
+      headRefName: `feature-${number}`,
+      defaultBranch: "main",
+      title: `PR ${number}`,
+      url: `https://github.com/me/app/pull/${number}`,
+      isDraft: false,
+      state: "OPEN",
+      reviewDecision: "REVIEW_REQUIRED",
+      mergeable: "MERGEABLE",
+      mergeStateStatus: "CLEAN",
+      isInMergeQueue: false,
+      autoMergeEnabled: false,
+      headRefOid: `sha-${number}`,
+      author: "me",
+      createdAt: "2026-05-20T00:00:00Z",
+      updatedAt: "2026-05-21T00:00:00Z",
+      reviews: [],
+      reviewRequested: [],
+      associatedOnBase: [],
+      checks: [],
+    };
+  }
+
+  function workload(prs: RawPr[]): ViewerWorkload {
+    return {
+      prs,
+      assignedIssues: [],
+      assignedIssuesTotalCount: 0,
+      reviewRequestedPrs: [],
+      reviewRequestedPrsTotalCount: 0,
+      personalReviewRequestedPrs: [],
+      personalReviewRequestsTotalCount: 0,
+    };
+  }
+
+  // Minimal client: a scripted workload sequence + no-op everything else.
+  function fakeClient(workloads: Array<() => Promise<ViewerWorkload>>): DashboardGitHubClient {
+    let i = 0;
+    return {
+      fetchViewer: () => Promise.resolve({ login: "me" }),
+      fetchViewerWorkload: () => workloads[Math.min(i++, workloads.length - 1)]!(),
+      resolveRepoMeta: () => Promise.resolve(new Map()),
+      fetchMergeQueue: () => Promise.resolve([]),
+      fetchDefaultBranchHead: () => Promise.resolve(undefined),
+      fetchDefaultBranchRecentRuns: () => Promise.resolve([]),
+    };
+  }
+
+  // The whole point of the fix: when a GitHub refresh throws (HTTP error or a
+  // partial GraphQL error surfaced as a thrown viewer-missing), the poller must
+  // keep the PRs from the last good fetch rather than broadcasting an empty
+  // board.
+  test("keeps the previous PRs when a later refresh throws", async () => {
+    const snaps: DashboardSnapshot[] = [];
+    const github = fakeClient([
+      () => Promise.resolve(workload([rawPr(1), rawPr(2)])),
+      () => Promise.reject(new Error("GitHub returned no viewer")),
+    ]);
+    const poller = new DashboardPoller({ github, onSnapshot: (s) => snaps.push(s) });
+
+    await poller.refreshGitHub();
+    expect(poller.getSnapshot().prs.map((p) => p.number).sort()).toEqual([1, 2]);
+
+    await poller.refreshGitHub();
+    const after = poller.getSnapshot();
+    expect(after.prs.map((p) => p.number).sort()).toEqual([1, 2]);
+    expect(after.errors.length).toBeGreaterThan(0);
   });
 });

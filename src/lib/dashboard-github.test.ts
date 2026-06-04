@@ -8,6 +8,7 @@ import {
   parseReviewRequestNode,
   parseStatItemNode,
   rateLimitDelayMs,
+  RealDashboardGitHubClient,
   type RawPr,
 } from "./dashboard-github.ts";
 
@@ -278,6 +279,68 @@ describe("ghRest / ghGraphql (direct GitHub REST/GraphQL over fetch)", () => {
     expect(data).toBeUndefined();
     // initial attempt + MAX_RETRIES (3) follow-ups
     expect(calls).toHaveLength(4);
+  });
+});
+
+describe("RealDashboardGitHubClient.fetchViewerWorkload (failure handling)", () => {
+  const realFetch = globalThis.fetch;
+  const realToken = process.env.GH_TOKEN;
+
+  beforeEach(() => {
+    process.env.GH_TOKEN = "tok-123";
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    if (realToken === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = realToken;
+  });
+
+  function stubResponse(status: number, body: unknown) {
+    globalThis.fetch = ((_url: string, _init?: RequestInit) =>
+      Promise.resolve({
+        ok: status >= 200 && status < 300,
+        status,
+        headers: new Headers(),
+        json: () => Promise.resolve(body),
+      } as Response)) as typeof fetch;
+  }
+
+  // GitHub answers HTTP 200 with `{ data: { viewer: null, ... }, errors: [...] }`
+  // on a partial failure (e.g. a timeout resolving a busy repo's
+  // statusCheckRollup). Treating that null viewer as "0 open PRs" wipes the
+  // board, so it must throw and let the poller keep the last good snapshot.
+  test("throws on a partial GraphQL error with a null viewer", async () => {
+    stubResponse(200, {
+      data: { viewer: null, assignedIssues: null, reviewRequestedPrs: null, personalReviewRequests: null },
+      errors: [{ message: "Something went wrong while executing your query." }],
+    });
+    const client = new RealDashboardGitHubClient();
+    await expect(client.fetchViewerWorkload()).rejects.toThrow();
+  });
+
+  // A network/HTTP-level failure leaves ghGraphql with no data at all.
+  test("throws when the request fails at the HTTP level", async () => {
+    stubResponse(502, {});
+    const client = new RealDashboardGitHubClient();
+    await expect(client.fetchViewerWorkload()).rejects.toThrow();
+  });
+
+  // A genuinely empty account (viewer present, no open PRs) must NOT throw —
+  // an empty board is the correct render here, not a stale one.
+  test("returns an empty workload when the viewer has no open PRs", async () => {
+    stubResponse(200, {
+      data: {
+        viewer: { pullRequests: { nodes: [] } },
+        assignedIssues: { issueCount: 0, nodes: [] },
+        reviewRequestedPrs: { issueCount: 0, nodes: [] },
+        personalReviewRequests: { issueCount: 0, nodes: [] },
+      },
+    });
+    const client = new RealDashboardGitHubClient();
+    const workload = await client.fetchViewerWorkload();
+    expect(workload.prs).toEqual([]);
+    expect(workload.assignedIssues).toEqual([]);
+    expect(workload.reviewRequestedPrs).toEqual([]);
   });
 });
 
