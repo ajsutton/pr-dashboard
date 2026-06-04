@@ -83,6 +83,7 @@ const server = Bun.serve({
     }
     if (pathname === "/" || pathname === "/index.html") return serveHtml("index.html");
     if (pathname === "/dashboard.css") return new Response(Bun.file(path.join(PUBLIC_DIR, "dashboard.css")));
+    if (pathname === "/kermit.png") return new Response(Bun.file(path.join(PUBLIC_DIR, "kermit.png")));
     if (pathname === "/dashboard.js") {
       return new Response(dashboardJs, { headers: { "Content-Type": "application/javascript; charset=utf-8" } });
     }

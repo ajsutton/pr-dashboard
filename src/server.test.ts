@@ -44,6 +44,15 @@ describe("dashboard server", () => {
     expect(snap).toHaveProperty("prs");
   });
 
+  it("serves the kermit image as a PNG", async () => {
+    const r = await fetch(`http://127.0.0.1:${port}/kermit.png`);
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toContain("image/png");
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    // PNG magic number.
+    expect(Array.from(bytes.slice(0, 4))).toEqual([0x89, 0x50, 0x4e, 0x47]);
+  });
+
   it("respects BASE_PATH in the base href", async () => {
     proc?.kill();
     proc = Bun.spawn(["bun", SERVER_PATH], {
