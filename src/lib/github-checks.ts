@@ -295,6 +295,7 @@ export function buildDefaultBranchJobs(opts: BuildDefaultBranchJobsOpts): Defaul
       repo: opts.repo,
       branch: opts.branch,
       name: newest.workflowName,
+      provider: "github",
       latest: workflowRunToJobRun(newest, opts.repo, opts.durationStats, opts.now),
       lastCompleted: completed
         ? workflowRunToJobRun(completed, opts.repo, opts.durationStats, opts.now)
@@ -352,6 +353,7 @@ export function buildCircleDefaultBranchJobs(opts: BuildCircleDefaultBranchJobsO
       repo: opts.repo,
       branch: opts.branch,
       name,
+      provider: "circleci",
       latest: circleWorkflowToRun(newest, opts.org, opts.repo, opts.durationStats, opts.now),
       lastCompleted: completed
         ? circleWorkflowToRun(completed, opts.org, opts.repo, opts.durationStats, opts.now)

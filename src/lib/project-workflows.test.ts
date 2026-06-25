@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { scanCircleWorkflows, type CircleConfigFile, buildCircleProjectWorkflows, buildActionsProjectWorkflows } from "./project-workflows.ts";
+import { scanCircleWorkflows, type CircleConfigFile, buildCircleProjectWorkflows, buildActionsProjectWorkflows, mergeProjectWorkflows } from "./project-workflows.ts";
+import type { DefaultBranchJob } from "../types.ts";
+import type { ProjectWorkflow } from "./project-workflows.ts";
 
 describe("scanCircleWorkflows", () => {
   test("unions workflow names across files, excludes version, dedupes", () => {
@@ -144,7 +146,7 @@ describe("buildActionsProjectWorkflows", () => {
           latestRun: { status, conclusion, updated_at: "2026-06-20T00:00:00Z", html_url: "https://x" },
         },
       ]);
-      expect(out[0]!.lastRun.status).toBe(expected);
+      expect(out[0]!.lastRun.status as string | undefined).toBe(expected);
     }
   });
 
@@ -164,7 +166,50 @@ describe("buildActionsProjectWorkflows", () => {
           latestRun: { status, conclusion: null, updated_at: "2026-06-20T00:00:00Z", html_url: "https://x" },
         },
       ]);
-      expect(out[0]!.lastRun.status).toBe(expected);
+      expect(out[0]!.lastRun.status as string | undefined).toBe(expected);
     }
+  });
+});
+
+describe("mergeProjectWorkflows", () => {
+  const recentJob: DefaultBranchJob = {
+    key: "o/r::circle::main",
+    repo: "o/r",
+    branch: "develop",
+    name: "main",
+    provider: "circleci",
+    latest: {
+      status: "success", url: "u", headSha: "s",
+      startedAt: "2026-06-26T00:00:00Z", elapsedMs: 1000, progressPct: 100,
+    },
+  };
+
+  test("annotates an existing recent-run job, keeps its latest", () => {
+    const expected: ProjectWorkflow[] = [
+      { repo: "o/r", provider: "circleci", name: "main", scheduled: false, lastRun: { found: true, status: "success", at: "2026-06-26T00:00:00Z" } },
+    ];
+    const out = mergeProjectWorkflows([recentJob], expected);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.latest).toBeDefined();
+    expect(out[0]!.expected).toBe(true);
+  });
+
+  test("adds an expected-only workflow as a latest-less card", () => {
+    const expected: ProjectWorkflow[] = [
+      { repo: "o/r", provider: "circleci", name: "weekly", scheduled: true, lastRun: { found: false } },
+    ];
+    const out = mergeProjectWorkflows([recentJob], expected);
+    const weekly = out.find((j) => j.name === "weekly")!;
+    expect(weekly.latest).toBeUndefined();
+    expect(weekly).toMatchObject({ expected: true, scheduled: true, provider: "circleci", lastRun: { found: false } });
+    expect(weekly.key).toBe("o/r::circleci::weekly");
+  });
+
+  test("does not merge across providers with the same name", () => {
+    const ghExpected: ProjectWorkflow[] = [
+      { repo: "o/r", provider: "github", name: "main", scheduled: false, lastRun: { found: true, status: "failed", at: "2026-06-25T00:00:00Z" } },
+    ];
+    const out = mergeProjectWorkflows([recentJob], ghExpected);
+    expect(out).toHaveLength(2); // circleci "main" (recent) + github "main" (expected)
   });
 });

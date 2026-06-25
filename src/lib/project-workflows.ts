@@ -5,7 +5,7 @@
  * hands them to these functions, which is what makes them unit-testable.
  */
 
-import type { CiJobStatusValue } from "../types.ts";
+import type { CiJobStatusValue, DefaultBranchJob } from "../types.ts";
 
 export interface CircleConfigFile {
   path: string;
@@ -222,4 +222,44 @@ export function buildActionsProjectWorkflows(repo: string, inputs: ActionsWorkfl
       lastRun,
     };
   });
+}
+
+const keyOf = (repo: string, provider: string, name: string) => `${repo}::${provider}::${name}`;
+
+/**
+ * Fold expected workflows into the recent-run job list. When a recent-run job
+ * already exists for the same (repo, provider, name) it is the richer source —
+ * keep its run data and only annotate it expected/scheduled/disabledState.
+ * Otherwise add a latest-less card carrying the long-lookback lastRun.
+ */
+export function mergeProjectWorkflows(
+  jobs: DefaultBranchJob[],
+  expected: ProjectWorkflow[],
+): DefaultBranchJob[] {
+  const byKey = new Map<string, DefaultBranchJob>();
+  for (const j of jobs) {
+    byKey.set(keyOf(j.repo, j.provider ?? "github", j.name), j);
+  }
+  for (const e of expected) {
+    const k = keyOf(e.repo, e.provider, e.name);
+    const existing = byKey.get(k);
+    if (existing) {
+      existing.expected = true;
+      existing.scheduled = e.scheduled;
+      if (e.disabledState) existing.disabledState = e.disabledState;
+    } else {
+      byKey.set(k, {
+        key: k,
+        repo: e.repo,
+        branch: "",
+        name: e.name,
+        provider: e.provider,
+        expected: true,
+        scheduled: e.scheduled,
+        disabledState: e.disabledState,
+        lastRun: e.lastRun,
+      });
+    }
+  }
+  return [...byKey.values()];
 }
