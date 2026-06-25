@@ -5,6 +5,8 @@
  * hands them to these functions, which is what makes them unit-testable.
  */
 
+import type { CiJobStatusValue } from "../types.ts";
+
 export interface CircleConfigFile {
   path: string;
   content: string;
@@ -61,4 +63,78 @@ function isScheduledWorkflow(def: unknown): boolean {
   if (/pipeline\.schedule/i.test(text)) return true;
   const paramRefs = text.match(/pipeline\.parameters\.([A-Za-z0-9_-]+)/gi) ?? [];
   return paramRefs.some((r) => SCHEDULE_PARAM_RE.test(r));
+}
+
+export interface RawInsightsRun {
+  status: string;
+  created_at?: string | undefined;
+  stopped_at?: string | undefined;
+}
+
+export interface ProjectLastRun {
+  found: boolean;
+  status?: CiJobStatusValue | undefined;
+  at?: string | undefined;
+  url?: string | undefined;
+}
+
+export interface ProjectWorkflow {
+  repo: string;
+  provider: "circleci" | "github";
+  name: string;
+  scheduled: boolean;
+  disabledState?: "disabled_manually" | "disabled_inactivity" | undefined;
+  lastRun: ProjectLastRun;
+}
+
+const CIRCLE_INSIGHTS_STATUS: Record<string, CiJobStatusValue> = {
+  success: "success",
+  failed: "failed",
+  error: "failed",
+  failing: "failed",
+  canceled: "canceled",
+  cancelled: "canceled",
+  running: "running",
+  on_hold: "blocked",
+  blocked: "blocked",
+  unauthorized: "blocked",
+};
+
+function mapInsightsStatus(raw: string | undefined): CiJobStatusValue {
+  if (!raw) return "unknown";
+  return CIRCLE_INSIGHTS_STATUS[raw] ?? "unknown";
+}
+
+export function buildCircleProjectWorkflows(args: {
+  repo: string;
+  org: string;
+  defined: DefinedWorkflow[];
+  ranWorkflowNames: Set<string>;
+  runsByName: Record<string, RawInsightsRun[]>;
+}): ProjectWorkflow[] {
+  const scheduledByName = new Map(args.defined.map((d) => [d.name, d.scheduled]));
+  const names = new Set<string>([...args.defined.map((d) => d.name), ...args.ranWorkflowNames]);
+  const projectUrl = `https://app.circleci.com/pipelines/github/${args.org}/${args.repo.replace(/^[^/]+\//, "")}`;
+
+  const out: ProjectWorkflow[] = [];
+  for (const name of names) {
+    const runs = args.runsByName[name] ?? [];
+    const newest = runs[0];
+    const lastRun: ProjectLastRun = newest
+      ? {
+          found: true,
+          status: mapInsightsStatus(newest.status),
+          at: newest.stopped_at ?? newest.created_at,
+          url: projectUrl,
+        }
+      : { found: false };
+    out.push({
+      repo: args.repo,
+      provider: "circleci",
+      name,
+      scheduled: scheduledByName.get(name) ?? false,
+      lastRun,
+    });
+  }
+  return out;
 }

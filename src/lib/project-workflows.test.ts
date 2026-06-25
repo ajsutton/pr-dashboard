@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { scanCircleWorkflows, type CircleConfigFile } from "./project-workflows.ts";
+import { scanCircleWorkflows, type CircleConfigFile, buildCircleProjectWorkflows } from "./project-workflows.ts";
 
 describe("scanCircleWorkflows", () => {
   test("unions workflow names across files, excludes version, dedupes", () => {
@@ -39,5 +39,51 @@ describe("scanCircleWorkflows", () => {
   test("plain PR-triggered workflow is not scheduled", () => {
     const content = "workflows:\n  pr:\n    jobs: [a]\n";
     expect(scanCircleWorkflows([{ path: "x.yml", content }])[0]!.scheduled).toBe(false);
+  });
+});
+
+describe("buildCircleProjectWorkflows", () => {
+  const base = { repo: "o/r", org: "o" };
+
+  test("maps last run from newest insights item", () => {
+    const out = buildCircleProjectWorkflows({
+      ...base,
+      defined: [{ name: "main", scheduled: false }],
+      ranWorkflowNames: new Set(["main"]),
+      runsByName: {
+        main: [
+          { status: "success", created_at: "2026-06-20T00:00:00Z", stopped_at: "2026-06-20T00:05:00Z" },
+          { status: "failed", created_at: "2026-06-10T00:00:00Z", stopped_at: "2026-06-10T00:05:00Z" },
+        ],
+      },
+    });
+    expect(out).toHaveLength(1);
+    expect(out[0]!.lastRun).toEqual({
+      found: true,
+      status: "success",
+      at: "2026-06-20T00:05:00Z",
+      url: "https://app.circleci.com/pipelines/github/o/r",
+    });
+  });
+
+  test("defined workflow that never ran → found:false, no per-workflow data needed", () => {
+    const out = buildCircleProjectWorkflows({
+      ...base,
+      defined: [{ name: "weekly", scheduled: true }],
+      ranWorkflowNames: new Set(),
+      runsByName: {},
+    });
+    expect(out[0]!).toMatchObject({ name: "weekly", scheduled: true, provider: "circleci", lastRun: { found: false } });
+  });
+
+  test("workflow that ran but is not in defined set is still included", () => {
+    const out = buildCircleProjectWorkflows({
+      ...base,
+      defined: [],
+      ranWorkflowNames: new Set(["setup"]),
+      runsByName: { setup: [{ status: "success", created_at: "2026-06-20T00:00:00Z", stopped_at: "2026-06-20T00:01:00Z" }] },
+    });
+    expect(out.map((w) => w.name)).toEqual(["setup"]);
+    expect(out[0]!.lastRun.found).toBe(true);
   });
 });
