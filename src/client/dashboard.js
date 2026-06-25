@@ -12,7 +12,7 @@ import {
   diffQueueEjections,
 } from "./dashboard-lifecycle.js";
 import { renderFailuresBlock } from "./dashboard-failures.js";
-import { jobSortRank, projectJobCompare } from "./jobsort.js";
+import { projectJobCompare } from "./jobsort.js";
 import {
   getTestCycle,
   injectTestPr,
@@ -765,9 +765,9 @@ function renderJobs(snap) {
     jobsEl.innerHTML = `<div class="db-empty">No recent builds on tracked default branches.</div>`;
     return;
   }
-  // Flat grid across all repos. Sort by interest (failures first via
-  // jobSortRank), then by repo order from the server, then by workflow name
-  // for stability within the same rank/repo.
+  // Flat grid across all repos. Sort by category (failures first, then
+  // cancelled, in-progress, scheduled-never-run, never-run, passing), then
+  // most-recent run first, then server repo order, then workflow name.
   const repoOrder = new Map((snap.repos ?? []).map((r, i) => [r, i]));
   const sorted = [...jobs].sort((a, b) => projectJobCompare(a, b, repoOrder));
   jobsEl.innerHTML = `<div class="db-jobs-grid">${sorted.map(renderJobCard).join("")}</div>`;

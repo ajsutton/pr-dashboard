@@ -51,7 +51,6 @@ describe("buildCircleProjectWorkflows", () => {
     const out = buildCircleProjectWorkflows({
       ...base,
       defined: [{ name: "main", scheduled: false }],
-      ranWorkflowNames: new Set(["main"]),
       runsByName: {
         main: [
           { status: "success", created_at: "2026-06-20T00:00:00Z", stopped_at: "2026-06-20T00:05:00Z" },
@@ -72,21 +71,18 @@ describe("buildCircleProjectWorkflows", () => {
     const out = buildCircleProjectWorkflows({
       ...base,
       defined: [{ name: "weekly", scheduled: true }],
-      ranWorkflowNames: new Set(),
       runsByName: {},
     });
     expect(out[0]!).toMatchObject({ name: "weekly", scheduled: true, provider: "circleci", lastRun: { found: false } });
   });
 
-  test("workflow that ran but is not in defined set is still included", () => {
+  test("workflow that ran but is not in the config is dropped (deleted/renamed)", () => {
     const out = buildCircleProjectWorkflows({
       ...base,
       defined: [],
-      ranWorkflowNames: new Set(["setup"]),
       runsByName: { setup: [{ status: "success", created_at: "2026-06-20T00:00:00Z", stopped_at: "2026-06-20T00:01:00Z" }] },
     });
-    expect(out.map((w) => w.name)).toEqual(["setup"]);
-    expect(out[0]!.lastRun.found).toBe(true);
+    expect(out).toHaveLength(0);
   });
 });
 

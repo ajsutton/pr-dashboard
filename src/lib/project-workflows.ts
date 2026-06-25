@@ -109,17 +109,19 @@ export function buildCircleProjectWorkflows(args: {
   repo: string;
   org: string;
   defined: DefinedWorkflow[];
-  ranWorkflowNames: Set<string>;
   runsByName: Record<string, RawInsightsRun[]>;
 }): ProjectWorkflow[] {
-  const scheduledByName = new Map(args.defined.map((d) => [d.name, d.scheduled]));
-  const names = new Set<string>([...args.defined.map((d) => d.name), ...args.ranWorkflowNames]);
-  const projectUrl = `https://app.circleci.com/pipelines/github/${args.org}/${args.repo.replace(/^[^/]+\//, "")}`;
+  // `args.repo` is already the `owner/repo` slug, which is exactly the
+  // `github/<owner>/<repo>` tail of a CircleCI pipelines URL.
+  const projectUrl = `https://app.circleci.com/pipelines/github/${args.repo}`;
 
+  // Only workflows defined in the committed config count as "expected". Insights
+  // is used solely to fill in each one's last run (newest item first); a
+  // workflow that ran recently but is no longer in the config (deleted/renamed)
+  // is intentionally not surfaced.
   const out: ProjectWorkflow[] = [];
-  for (const name of names) {
-    const runs = args.runsByName[name] ?? [];
-    const newest = runs[0];
+  for (const { name, scheduled } of args.defined) {
+    const newest = (args.runsByName[name] ?? [])[0];
     const lastRun: ProjectLastRun = newest
       ? {
           found: true,
@@ -128,13 +130,7 @@ export function buildCircleProjectWorkflows(args: {
           url: projectUrl,
         }
       : { found: false };
-    out.push({
-      repo: args.repo,
-      provider: "circleci",
-      name,
-      scheduled: scheduledByName.get(name) ?? false,
-      lastRun,
-    });
+    out.push({ repo: args.repo, provider: "circleci", name, scheduled, lastRun });
   }
   return out;
 }

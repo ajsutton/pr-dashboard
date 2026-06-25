@@ -212,18 +212,20 @@ export class DashboardPoller {
             defined = scanCircleWorkflows(files);
             if (sha) this.circleConfigCache.set(repo, { sha, defined });
           }
+          // One Insights call tells us which workflows ran in the window; only
+          // fetch per-workflow runs for ones still in the config (the expected
+          // set), skipping deleted/renamed stragglers entirely.
+          const definedNames = new Set(defined.map((d) => d.name));
           const ranNames = await this.circle.getInsightsWorkflowNames(owner, name);
           const runsByName: Record<string, RawInsightsRun[]> = {};
           await Promise.all(
-            ranNames.map(async (wf) => {
-              runsByName[wf] = await this.circle.getInsightsWorkflowRuns(owner, name, wf);
-            }),
+            ranNames
+              .filter((wf) => definedNames.has(wf))
+              .map(async (wf) => {
+                runsByName[wf] = await this.circle.getInsightsWorkflowRuns(owner, name, wf);
+              }),
           );
-          list.push(
-            ...buildCircleProjectWorkflows({
-              repo, org: owner, defined, ranWorkflowNames: new Set(ranNames), runsByName,
-            }),
-          );
+          list.push(...buildCircleProjectWorkflows({ repo, org: owner, defined, runsByName }));
         } catch (err) {
           this.errors.push(`project-workflows circle ${repo}: ${String(err)}`);
         }
