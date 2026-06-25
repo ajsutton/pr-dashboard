@@ -45,3 +45,28 @@ describe("jobSortRank", () => {
     expect(jobSortRank(mk("running", "canceled"))).toBe(1);
   });
 });
+
+import { projectJobCompare } from "./jobsort.js";
+
+describe("projectJobCompare", () => {
+  const repoOrder = new Map([["o/r", 0]]);
+  const mk = (over) => ({ repo: "o/r", branch: "", name: "n", ...over });
+
+  test("scheduled sorts before non-scheduled", () => {
+    const sched = mk({ name: "weekly", scheduled: true, lastRun: { found: false } });
+    const plain = mk({ name: "ci", latest: { status: "success", progressPct: 100 } });
+    expect(projectJobCompare(sched, plain, repoOrder)).toBeLessThan(0);
+  });
+
+  test("within scheduled, never-run/oldest sorts first", () => {
+    const never = mk({ name: "a", scheduled: true, lastRun: { found: false } });
+    const recent = mk({ name: "b", scheduled: true, lastRun: { found: true, at: "2026-06-26T00:00:00Z" } });
+    expect(projectJobCompare(never, recent, repoOrder)).toBeLessThan(0);
+  });
+
+  test("older last-run sorts before newer", () => {
+    const old = mk({ name: "a", scheduled: true, lastRun: { found: true, at: "2026-06-01T00:00:00Z" } });
+    const fresh = mk({ name: "b", scheduled: true, lastRun: { found: true, at: "2026-06-25T00:00:00Z" } });
+    expect(projectJobCompare(old, fresh, repoOrder)).toBeLessThan(0);
+  });
+});
