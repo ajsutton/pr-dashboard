@@ -14,6 +14,7 @@ import type {
   RepoMeta,
   ViewerWorkload,
 } from "./dashboard-github.ts";
+import type { CircleCiClient } from "./circleci.ts";
 import type { DashboardSnapshot } from "../types.ts";
 
 function meta(canonical: string, openIssues = 0, openPrs = 0): RepoMeta {
@@ -274,6 +275,10 @@ describe("DashboardPoller refresh resilience", () => {
       fetchMergeQueue: () => Promise.resolve([]),
       fetchDefaultBranchHead: () => Promise.resolve(undefined),
       fetchDefaultBranchRecentRuns: () => Promise.resolve([]),
+      listCircleConfigFiles: () => Promise.resolve([]),
+      fetchTextFile: () => Promise.resolve(undefined),
+      fetchActionsWorkflows: () => Promise.resolve([]),
+      fetchLatestWorkflowRun: () => Promise.resolve(undefined),
     };
   }
 
@@ -296,5 +301,179 @@ describe("DashboardPoller refresh resilience", () => {
     const after = poller.getSnapshot();
     expect(after.prs.map((p) => p.number).sort()).toEqual([1, 2]);
     expect(after.errors.length).toBeGreaterThan(0);
+  });
+});
+
+describe("DashboardPoller refreshProjectWorkflows", () => {
+  const CIRCLE_CONFIG_YAML = [
+    "workflows:",
+    "  main:",
+    "    jobs: [build]",
+    "  weekly:",
+    "    when: << pipeline.schedule.name >>",
+    "    jobs: [report]",
+  ].join("\n");
+
+  function makeGitHubWithWorkflows(): DashboardGitHubClient {
+    return {
+      fetchViewer: () => Promise.resolve({ login: "me" }),
+      fetchViewerWorkload: () =>
+        Promise.resolve({
+          prs: [],
+          assignedIssues: [],
+          assignedIssuesTotalCount: 0,
+          reviewRequestedPrs: [],
+          reviewRequestedPrsTotalCount: 0,
+          personalReviewRequestedPrs: [],
+          personalReviewRequestsTotalCount: 0,
+        }),
+      resolveRepoMeta: () => Promise.resolve(new Map()),
+      fetchMergeQueue: () => Promise.resolve([]),
+      fetchDefaultBranchHead: () =>
+        Promise.resolve({ branch: "main", sha: "abc123", checks: [] }),
+      fetchDefaultBranchRecentRuns: () => Promise.resolve([]),
+      listCircleConfigFiles: () =>
+        Promise.resolve([{ path: ".circleci/config.yml", content: CIRCLE_CONFIG_YAML }]),
+      fetchTextFile: () => Promise.resolve(undefined),
+      fetchActionsWorkflows: () => Promise.resolve([]),
+      fetchLatestWorkflowRun: () => Promise.resolve(undefined),
+    };
+  }
+
+  function makeCircleWithInsights(): CircleCiClient {
+    return {
+      getPipelineByNumber: () => Promise.resolve(undefined),
+      getPipelineForSha: () => Promise.resolve(undefined),
+      getLatestPipelineForBranch: () => Promise.resolve(undefined),
+      listPipelinesForBranchSince: () => Promise.resolve([]),
+      getWorkflows: () => Promise.resolve([]),
+      getJobs: () => Promise.resolve([]),
+      getFailedTests: () => Promise.resolve([]),
+      getInsightsWorkflowNames: (_owner, _name) => Promise.resolve(["main"]),
+      getInsightsWorkflowRuns: (_owner, _name, wf) =>
+        Promise.resolve(
+          wf === "main"
+            ? [{ status: "success", created_at: "2026-06-20T00:00:00Z", stopped_at: "2026-06-20T00:01:00Z" }]
+            : [],
+        ),
+    };
+  }
+
+  test("folds expected scheduled workflows into defaultBranchJobs", async () => {
+    const snaps: DashboardSnapshot[] = [];
+    const poller = new DashboardPoller({
+      pinnedRepos: ["o/r"],
+      github: makeGitHubWithWorkflows(),
+      circle: makeCircleWithInsights(),
+      onSnapshot: (s) => snaps.push(s),
+    });
+
+    await poller.refreshGitHub();
+    await poller.refreshProjectWorkflows();
+
+    const jobs = snaps.at(-1)!.defaultBranchJobs;
+    const weekly = jobs.find((j) => j.name === "weekly");
+    expect(weekly).toBeTruthy();
+    expect(weekly!.scheduled).toBe(true);
+    expect(weekly!.lastRun!.found).toBe(false);
+  });
+
+  test("caches config files per SHA so unchanged configs are not re-fetched each tick", async () => {
+    // Call counters for config-fetch methods (should be called only once) vs
+    // live-data methods (should be called once per tick).
+    let listCircleConfigFilesCount = 0;
+    let fetchTextFileCount = 0;
+    let getInsightsWorkflowNamesCount = 0;
+    let fetchActionsWorkflowsCount = 0;
+
+    const ACTIONS_YAML = [
+      "on:",
+      "  schedule:",
+      "    - cron: '0 0 * * 0'",
+      "jobs:",
+      "  report:",
+      "    runs-on: ubuntu-latest",
+      "    steps: []",
+    ].join("\n");
+
+    const github: DashboardGitHubClient = {
+      fetchViewer: () => Promise.resolve({ login: "me" }),
+      fetchViewerWorkload: () =>
+        Promise.resolve({
+          prs: [],
+          assignedIssues: [],
+          assignedIssuesTotalCount: 0,
+          reviewRequestedPrs: [],
+          reviewRequestedPrsTotalCount: 0,
+          personalReviewRequestedPrs: [],
+          personalReviewRequestsTotalCount: 0,
+        }),
+      resolveRepoMeta: () => Promise.resolve(new Map()),
+      fetchMergeQueue: () => Promise.resolve([]),
+      // Always returns the same SHA so the cache key matches across ticks.
+      fetchDefaultBranchHead: () =>
+        Promise.resolve({ branch: "main", sha: "sha-stable", checks: [] }),
+      fetchDefaultBranchRecentRuns: () => Promise.resolve([]),
+      listCircleConfigFiles: () => {
+        listCircleConfigFilesCount++;
+        return Promise.resolve([{ path: ".circleci/config.yml", content: CIRCLE_CONFIG_YAML }]);
+      },
+      fetchTextFile: (_repo, _path) => {
+        fetchTextFileCount++;
+        return Promise.resolve(ACTIONS_YAML);
+      },
+      fetchActionsWorkflows: () => {
+        fetchActionsWorkflowsCount++;
+        return Promise.resolve([
+          { id: 1, name: "Weekly Report", path: ".github/workflows/report.yml", state: "active" },
+        ]);
+      },
+      fetchLatestWorkflowRun: () => Promise.resolve(undefined),
+    };
+
+    const circle: CircleCiClient = {
+      getPipelineByNumber: () => Promise.resolve(undefined),
+      getPipelineForSha: () => Promise.resolve(undefined),
+      getLatestPipelineForBranch: () => Promise.resolve(undefined),
+      listPipelinesForBranchSince: () => Promise.resolve([]),
+      getWorkflows: () => Promise.resolve([]),
+      getJobs: () => Promise.resolve([]),
+      getFailedTests: () => Promise.resolve([]),
+      getInsightsWorkflowNames: () => {
+        getInsightsWorkflowNamesCount++;
+        return Promise.resolve(["main"]);
+      },
+      getInsightsWorkflowRuns: (_owner, _name, wf) =>
+        Promise.resolve(
+          wf === "main"
+            ? [{ status: "success", created_at: "2026-06-20T00:00:00Z", stopped_at: "2026-06-20T00:01:00Z" }]
+            : [],
+        ),
+    };
+
+    const poller = new DashboardPoller({
+      pinnedRepos: ["o/r"],
+      github,
+      circle,
+      onSnapshot: () => {},
+    });
+
+    // Seed defaultBranchSeed (gives the poller the head SHA needed for caching).
+    await poller.refreshGitHub();
+
+    // First tick: cold cache — all fetches happen.
+    await poller.refreshProjectWorkflows();
+    expect(listCircleConfigFilesCount).toBe(1);
+    expect(fetchTextFileCount).toBe(1);
+    expect(getInsightsWorkflowNamesCount).toBe(1);
+    expect(fetchActionsWorkflowsCount).toBe(1);
+
+    // Second tick: SHA unchanged — config fetches must be skipped, but live
+    // data (Insights names + Actions workflow list) must be re-fetched.
+    await poller.refreshProjectWorkflows();
+    expect(listCircleConfigFilesCount).toBe(1); // cached — no second fetch
+    expect(fetchTextFileCount).toBe(1);         // cached — no second fetch
+    expect(getInsightsWorkflowNamesCount).toBe(2); // live data — fetched every tick
+    expect(fetchActionsWorkflowsCount).toBe(2);    // live data — fetched every tick
   });
 });

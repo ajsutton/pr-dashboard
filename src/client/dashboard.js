@@ -12,7 +12,7 @@ import {
   diffQueueEjections,
 } from "./dashboard-lifecycle.js";
 import { renderFailuresBlock } from "./dashboard-failures.js";
-import { jobSortRank } from "./jobsort.js";
+import { projectJobCompare } from "./jobsort.js";
 import {
   getTestCycle,
   injectTestPr,
@@ -22,19 +22,20 @@ import { pipelineActivity } from "./pipeline-activity.js";
 import { buildStatCards } from "./dashboard-stats.js";
 import { boardAllGreen, nextKermitAction } from "./board-green.js";
 
-const conn = document.getElementById("db-conn");
-const kermitEl = document.getElementById("db-kermit");
+const isBrowser = typeof document !== "undefined";
+const conn = isBrowser ? document.getElementById("db-conn") : null;
+const kermitEl = isBrowser ? document.getElementById("db-kermit") : null;
 // Pending animationend handler while Kermit topples off the pill, so a green
 // board mid-fall can cancel it instead of leaking a listener.
 let kermitFallEnd = null;
-const userEl = document.getElementById("db-user");
-const updatedEl = document.getElementById("db-updated");
-const queuesSection = document.getElementById("db-queues-section");
-const queuesEl = document.getElementById("db-queues");
-const jobsEl = document.getElementById("db-jobs");
-const stacksSection = document.getElementById("db-stacks-section");
-const stacksEl = document.getElementById("db-stacks");
-const statsEl = document.getElementById("db-stats");
+const userEl = isBrowser ? document.getElementById("db-user") : null;
+const updatedEl = isBrowser ? document.getElementById("db-updated") : null;
+const queuesSection = isBrowser ? document.getElementById("db-queues-section") : null;
+const queuesEl = isBrowser ? document.getElementById("db-queues") : null;
+const jobsEl = isBrowser ? document.getElementById("db-jobs") : null;
+const stacksSection = isBrowser ? document.getElementById("db-stacks-section") : null;
+const stacksEl = isBrowser ? document.getElementById("db-stacks") : null;
+const statsEl = isBrowser ? document.getElementById("db-stats") : null;
 
 // ID of the currently open stat overlay, or null. Survives re-renders so a
 // snapshot arriving while the overlay is open doesn't close it. Only one
@@ -50,7 +51,7 @@ let prevQueueState = new Map();
 let prevMergedByRepo = new Map();
 let activeLifecycles = { entering: new Set(), exiting: new Set(), ejecting: new Set() };
 
-const TEST_CYCLE = getTestCycle();
+const TEST_CYCLE = isBrowser ? getTestCycle() : null;
 const TEST_MODE = TEST_CYCLE !== null;
 const TEST_CYCLE_MS = 5000;
 let testCycleIdx = 0;
@@ -502,19 +503,21 @@ function overlayInnerHtml(card) {
   `;
 }
 
-statsEl?.addEventListener("click", (ev) => {
-  const cardEl = ev.target.closest(".db-stat-card");
-  if (!cardEl) return;
-  const id = cardEl.dataset.statId;
-  if (!id) return;
-  const card = findStatCard(id);
-  if (!card) return;
-  openStatOverlay(card, cardEl);
-});
+if (isBrowser) {
+  statsEl?.addEventListener("click", (ev) => {
+    const cardEl = ev.target.closest(".db-stat-card");
+    if (!cardEl) return;
+    const id = cardEl.dataset.statId;
+    if (!id) return;
+    const card = findStatCard(id);
+    if (!card) return;
+    openStatOverlay(card, cardEl);
+  });
 
-document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape" && openStatId) closeStatOverlay();
-});
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && openStatId) closeStatOverlay();
+  });
+}
 
 function renderStacks(snap) {
   // PRs in the merge queue render as queue cards, not stack cards (sharing a
@@ -683,7 +686,42 @@ function jobTone(status) {
   }
 }
 
-function renderJobCard(job) {
+function schedBadge(job) {
+  return job.scheduled ? `<span class="db-job-sched" title="scheduled">⏱</span>` : "";
+}
+
+export function renderJobCard(job) {
+  const slash = job.repo.indexOf("/");
+  const repoOwner = slash >= 0 ? job.repo.slice(0, slash) : "";
+  const repoName = slash >= 0 ? job.repo.slice(slash + 1) : job.repo;
+  const branch = job.branch || "";
+  const vt = `db-job-${job.key.replace(/[^a-zA-Z0-9-]/g, "_")}`;
+
+  // Expected workflow with no in-window run: render a last-run / not-found card.
+  if (!job.latest) {
+    const lr = job.lastRun || { found: false };
+    const tone = lr.found ? jobTone(lr.status) : "muted";
+    const ageText = lr.found && lr.at ? `last ran ${fmtAge(Date.now() - Date.parse(lr.at))} ago` : "last run not found";
+    const disabled = job.disabledState ? `<span class="db-job-disabled">disabled</span>` : "";
+    const href = lr.url || "#";
+    return `
+    <article class="db-job db-job-expected" data-head-tone="${tone}" data-foot-tone="${tone}" data-job-key="${escapeAttr(job.key)}" style="view-transition-name: ${vt}">
+      <a class="db-job-head" href="${escapeAttr(href)}" target="_blank" rel="noopener">
+        <div class="db-job-project">
+          ${repoOwner ? `<span class="db-job-project-owner">${escapeHtml(repoOwner)}/</span>` : ""}<span class="db-job-project-repo">${escapeHtml(repoName)}</span>
+        </div>
+        <header class="db-job-meta">
+          <span class="db-job-name">${schedBadge(job)}${escapeHtml(job.name || "(unnamed workflow)")}</span>
+          ${disabled}
+        </header>
+        <div class="db-job-time">${escapeHtml(ageText)}</div>
+      </a>
+      <a class="db-job-foot" data-tone="${tone}" href="${escapeAttr(href)}" target="_blank" rel="noopener">
+        <span class="db-job-foot-label">${lr.found ? escapeHtml(String(lr.status).toUpperCase()) : "NOT FOUND"}</span>
+      </a>
+    </article>`;
+  }
+
   const latest = job.latest;
   const completed = job.lastCompleted;
   const headTone = jobTone(latest.status);
@@ -696,19 +734,10 @@ function renderJobCard(job) {
   const bar = isRunning
     ? `<div class="db-bar"><div class="db-bar-fill" data-tone="${headTone}" style="width:${pct}%"></div></div>`
     : "";
-  const completedAgo = completed?.stoppedAt
-    ? fmtAge(Date.now() - Date.parse(completed.stoppedAt))
-    : "";
-  const completedLabel = completed
-    ? completed.status.toUpperCase()
-    : "NO RECENT RESULT";
+  const completedAgo = completed?.stoppedAt ? fmtAge(Date.now() - Date.parse(completed.stoppedAt)) : "";
+  const completedLabel = completed ? completed.status.toUpperCase() : "NO RECENT RESULT";
   const completedHref = completed?.url || latest.url;
   const headHref = latest.url;
-  const vt = `db-job-${job.key.replace(/[^a-zA-Z0-9-]/g, "_")}`;
-  const slash = job.repo.indexOf("/");
-  const repoOwner = slash >= 0 ? job.repo.slice(0, slash) : "";
-  const repoName = slash >= 0 ? job.repo.slice(slash + 1) : job.repo;
-  const branch = job.branch || "";
   return `
     <article class="db-job" data-head-tone="${headTone}" data-foot-tone="${footTone}" data-job-key="${escapeAttr(job.key)}" style="view-transition-name: ${vt}">
       <a class="db-job-head" href="${escapeAttr(headHref)}" target="_blank" rel="noopener">
@@ -717,7 +746,7 @@ function renderJobCard(job) {
           ${branch ? `<span class="db-job-project-branch">${escapeHtml(branch)}</span>` : ""}
         </div>
         <header class="db-job-meta">
-          <span class="db-job-name">${escapeHtml(job.name || "(unnamed workflow)")}</span>
+          <span class="db-job-name">${schedBadge(job)}${escapeHtml(job.name || "(unnamed workflow)")}</span>
           <span class="db-job-status">${escapeHtml(latest.status.toUpperCase())}</span>
         </header>
         <div class="db-job-time">${escapeHtml(headTime)}</div>
@@ -727,8 +756,7 @@ function renderJobCard(job) {
         <span class="db-job-foot-label">${escapeHtml(completedLabel)}</span>
         ${completedAgo ? `<span class="db-job-foot-age">${escapeHtml(completedAgo)} ago</span>` : ""}
       </a>
-    </article>
-  `;
+    </article>`;
 }
 
 function renderJobs(snap) {
@@ -737,20 +765,11 @@ function renderJobs(snap) {
     jobsEl.innerHTML = `<div class="db-empty">No recent builds on tracked default branches.</div>`;
     return;
   }
-  // Flat grid across all repos. Sort by interest (failures first via
-  // jobSortRank), then by repo order from the server, then by workflow name
-  // for stability within the same rank/repo.
+  // Flat grid across all repos. Sort by category (failures first, then
+  // cancelled, in-progress, scheduled-never-run, never-run, passing), then
+  // most-recent run first, then server repo order, then workflow name.
   const repoOrder = new Map((snap.repos ?? []).map((r, i) => [r, i]));
-  const sorted = [...jobs].sort((a, b) => {
-    const ra = jobSortRank(a);
-    const rb = jobSortRank(b);
-    if (ra !== rb) return ra - rb;
-    const ria = repoOrder.get(a.repo) ?? 1e6;
-    const rib = repoOrder.get(b.repo) ?? 1e6;
-    if (ria !== rib) return ria - rib;
-    if (a.repo !== b.repo) return a.repo.localeCompare(b.repo);
-    return a.name.localeCompare(b.name);
-  });
+  const sorted = [...jobs].sort((a, b) => projectJobCompare(a, b, repoOrder));
   jobsEl.innerHTML = `<div class="db-jobs-grid">${sorted.map(renderJobCard).join("")}</div>`;
 }
 
@@ -1182,29 +1201,31 @@ function connect() {
   });
 }
 
-// Bootstrap snapshot via REST in case we missed the initial WS push.
-fetch("api/dashboard")
-  .then((r) => r.json())
-  .then((data) => {
-    if (data && data.prs) {
-      latest = data;
-      render();
+if (isBrowser) {
+  // Bootstrap snapshot via REST in case we missed the initial WS push.
+  fetch("api/dashboard")
+    .then((r) => r.json())
+    .then((data) => {
+      if (data && data.prs) {
+        latest = data;
+        render();
+      }
+    })
+    .catch(() => {});
+
+  connect();
+
+  updatedTicker = setInterval(updateTimestamp, 1000);
+
+  if (TEST_MODE) {
+    // Render immediately so the test PR shows up even before any real data
+    // arrives over the wire, then advance through the cycle every five seconds.
+    render();
+    if (TEST_CYCLE.length > 1) {
+      setInterval(() => {
+        testCycleIdx = (testCycleIdx + 1) % TEST_CYCLE.length;
+        render();
+      }, TEST_CYCLE_MS);
     }
-  })
-  .catch(() => {});
-
-connect();
-
-updatedTicker = setInterval(updateTimestamp, 1000);
-
-if (TEST_MODE) {
-  // Render immediately so the test PR shows up even before any real data
-  // arrives over the wire, then advance through the cycle every five seconds.
-  render();
-  if (TEST_CYCLE.length > 1) {
-    setInterval(() => {
-      testCycleIdx = (testCycleIdx + 1) % TEST_CYCLE.length;
-      render();
-    }, TEST_CYCLE_MS);
   }
 }

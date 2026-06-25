@@ -1211,3 +1211,9 @@ body { min-height: 100vh; font-size: 16px; }
   .db-ci-time { font-size: 15px; }
   .db-job-name { font-size: 22px; }
 }
+
+.db-job-sched { margin-right: 0.3em; opacity: 0.85; }
+.db-job-expected .db-job-time { opacity: 0.8; font-style: italic; }
+.db-job-disabled,
+.db-job-expected .db-job-foot-label { letter-spacing: 0.04em; }
+.db-job-disabled { margin-left: 0.4em; font-size: 0.75em; opacity: 0.7; text-transform: uppercase; }

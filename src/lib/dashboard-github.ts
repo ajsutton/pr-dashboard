@@ -6,6 +6,7 @@
 
 import type { PrCard, MergeQueueEntry } from "../types.ts";
 import { debugLog, summarizeQuery, truncateBody } from "./debug.ts";
+import type { CircleConfigFile, RawActionsWorkflow, RawActionsRun } from "./project-workflows.ts";
 
 export interface RawCheckContext {
   __typename: "CheckRun" | "StatusContext" | string;
@@ -146,6 +147,10 @@ export interface DashboardGitHubClient {
    * workflow so cards can show progress + last-result colour.
    */
   fetchDefaultBranchRecentRuns(repo: string, branch: string, windowHours: number): Promise<RawWorkflowRun[]>;
+  listCircleConfigFiles(repo: string): Promise<CircleConfigFile[]>;
+  fetchTextFile(repo: string, path: string): Promise<string | undefined>;
+  fetchActionsWorkflows(repo: string): Promise<RawActionsWorkflow[]>;
+  fetchLatestWorkflowRun(repo: string, workflowId: number): Promise<RawActionsRun | undefined>;
 }
 
 const GITHUB_API = "https://api.github.com";
@@ -962,6 +967,65 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
       }
     }
     return { branch, sha, checks };
+  }
+
+  async listCircleConfigFiles(repo: string): Promise<CircleConfigFile[]> {
+    const [owner, name] = repo.split("/");
+    if (!owner || !name) return [];
+    const head = await this.fetchDefaultBranchHead(repo);
+    if (!head) return [];
+    const tree = (await ghRest(
+      `/repos/${owner}/${name}/git/trees/${head.sha}?recursive=1`,
+    )) as { tree?: Array<{ path?: string; type?: string }> } | undefined;
+    const paths = (tree?.tree ?? [])
+      .filter((t) => t.type === "blob" && typeof t.path === "string"
+        && t.path.startsWith(".circleci/") && /\.ya?ml$/i.test(t.path))
+      .map((t) => t.path as string);
+    const files: CircleConfigFile[] = [];
+    for (const path of paths) {
+      const content = await this.fetchTextFile(repo, path);
+      if (content != null) files.push({ path, content });
+    }
+    return files;
+  }
+
+  async fetchTextFile(repo: string, path: string): Promise<string | undefined> {
+    const [owner, name] = repo.split("/");
+    if (!owner || !name) return undefined;
+    const data = (await ghRest(
+      `/repos/${owner}/${name}/contents/${path.split("/").map(encodeURIComponent).join("/")}`,
+    )) as { content?: string; encoding?: string } | undefined;
+    if (!data?.content) return undefined;
+    if (data.encoding === "base64") return Buffer.from(data.content, "base64").toString("utf8");
+    return data.content;
+  }
+
+  async fetchActionsWorkflows(repo: string): Promise<RawActionsWorkflow[]> {
+    const [owner, name] = repo.split("/");
+    if (!owner || !name) return [];
+    const data = (await ghRest(`/repos/${owner}/${name}/actions/workflows?per_page=100`)) as
+      | { workflows?: Array<{ id?: number; name?: string; path?: string; state?: string }> }
+      | undefined;
+    return (data?.workflows ?? [])
+      .filter((w) => typeof w.id === "number")
+      .map((w) => ({ id: w.id as number, name: w.name ?? "", path: w.path ?? "", state: w.state ?? "active" }));
+  }
+
+  async fetchLatestWorkflowRun(repo: string, workflowId: number): Promise<RawActionsRun | undefined> {
+    const [owner, name] = repo.split("/");
+    if (!owner || !name) return undefined;
+    const data = (await ghRest(
+      `/repos/${owner}/${name}/actions/workflows/${workflowId}/runs?per_page=1`,
+    )) as { workflow_runs?: Array<Record<string, unknown>> } | undefined;
+    const r = data?.workflow_runs?.[0];
+    if (!r) return undefined;
+    return {
+      status: (r["status"] as string) ?? "",
+      conclusion: (r["conclusion"] as string | null) ?? undefined,
+      created_at: (r["created_at"] as string) ?? undefined,
+      updated_at: (r["updated_at"] as string) ?? undefined,
+      html_url: (r["html_url"] as string) ?? undefined,
+    };
   }
 
   /**

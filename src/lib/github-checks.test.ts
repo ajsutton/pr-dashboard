@@ -99,7 +99,8 @@ describe("buildDefaultBranchJobs", () => {
     expect(out.length).toBe(2);
     const ci = out.find((j) => j.name === "CI")!;
     expect(ci.key).toBe("o/r::wf-1");
-    expect(ci.latest.url).toBe("u-ci-1");
+    // builder always sets latest when it pushes a job
+    expect(ci.latest!.url).toBe("u-ci-1");
     const watchdog = out.find((j) => j.name === "TODO Issue Watchdog")!;
     expect(watchdog.key).toBe("o/r::wf-2");
   });
@@ -118,8 +119,8 @@ describe("buildDefaultBranchJobs", () => {
     });
     expect(out.length).toBe(1);
     const job = out[0]!;
-    expect(job.latest.status).toBe("running");
-    expect(job.latest.url).toBe("running-url");
+    expect(job.latest!.status).toBe("running");
+    expect(job.latest!.url).toBe("running-url");
     expect(job.lastCompleted!.status).toBe("success");
     expect(job.lastCompleted!.url).toBe("completed-url");
   });
@@ -150,7 +151,7 @@ describe("buildDefaultBranchJobs", () => {
       windowMs: 72 * HOUR,
     });
     expect(out.length).toBe(1);
-    expect(out[0]!.latest.status).toBe("running");
+    expect(out[0]!.latest!.status).toBe("running");
     expect(out[0]!.lastCompleted).toBeUndefined();
   });
 });
@@ -201,9 +202,9 @@ describe("buildCircleDefaultBranchJobs", () => {
     });
     const byName = new Map(out.map((j) => [j.name, j]));
     expect(byName.size).toBe(2);
-    expect(byName.get("build")!.latest.status).toBe("running");
+    expect(byName.get("build")!.latest!.status).toBe("running");
     expect(byName.get("build")!.lastCompleted!.status).toBe("success");
-    expect(byName.get("test")!.latest.status).toBe("success");
+    expect(byName.get("test")!.latest!.status).toBe("success");
     expect(byName.get("test")!.lastCompleted!.status).toBe("success");
   });
 
@@ -230,6 +231,6 @@ describe("buildCircleDefaultBranchJobs", () => {
       now,
       windowMs: 24 * HOUR,
     });
-    expect(out[0]!.latest.url).toContain("ethereum-optimism/optimism/4242/workflows/wf-4242-build");
+    expect(out[0]!.latest!.url).toContain("ethereum-optimism/optimism/4242/workflows/wf-4242-build");
   });
 });

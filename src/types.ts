@@ -96,10 +96,22 @@ export interface DefaultBranchJob {
   branch: string;
   /** Workflow name (GitHub Actions workflow or CircleCI workflow). */
   name: string;
-  /** Most recent run — drives the progress / top portion of the card. */
-  latest: DefaultBranchJobRun;
-  /** Most recent *completed* run — drives the bottom colour. Undefined until at least one run finishes within the window. */
+  /** Most recent run within the recent-runs window. Absent for an expected
+   *  workflow that has not run recently. */
+  latest?: DefaultBranchJobRun | undefined;
+  /** Most recent *completed* run within the window. */
   lastCompleted?: DefaultBranchJobRun | undefined;
+  /** CI provider, used to key the merge against expected workflows. */
+  provider?: "circleci" | "github" | undefined;
+  /** True when this workflow appears in the committed config / Actions list. */
+  expected?: boolean | undefined;
+  /** True when the workflow is schedule-driven. */
+  scheduled?: boolean | undefined;
+  /** GitHub Actions disabled state, when applicable. */
+  disabledState?: "disabled_manually" | "disabled_inactivity" | undefined;
+  /** Long-lookback last run, used when there is no in-window `latest`.
+   *  `found: false` → render "last run not found". */
+  lastRun?: { found: boolean; status?: CiJobStatusValue | undefined; at?: string | undefined; url?: string | undefined } | undefined;
 }
 
 export interface StatItem {
