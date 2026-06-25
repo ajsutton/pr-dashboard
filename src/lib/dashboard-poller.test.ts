@@ -14,6 +14,7 @@ import type {
   RepoMeta,
   ViewerWorkload,
 } from "./dashboard-github.ts";
+import type { CircleCiClient } from "./circleci.ts";
 import type { DashboardSnapshot } from "../types.ts";
 
 function meta(canonical: string, openIssues = 0, openPrs = 0): RepoMeta {
@@ -300,5 +301,80 @@ describe("DashboardPoller refresh resilience", () => {
     const after = poller.getSnapshot();
     expect(after.prs.map((p) => p.number).sort()).toEqual([1, 2]);
     expect(after.errors.length).toBeGreaterThan(0);
+  });
+});
+
+describe("DashboardPoller refreshProjectWorkflows", () => {
+  const CIRCLE_CONFIG_YAML = [
+    "workflows:",
+    "  main:",
+    "    jobs: [build]",
+    "  weekly:",
+    "    when: << pipeline.schedule.name >>",
+    "    jobs: [report]",
+  ].join("\n");
+
+  function makeGitHubWithWorkflows(): DashboardGitHubClient {
+    return {
+      fetchViewer: () => Promise.resolve({ login: "me" }),
+      fetchViewerWorkload: () =>
+        Promise.resolve({
+          prs: [],
+          assignedIssues: [],
+          assignedIssuesTotalCount: 0,
+          reviewRequestedPrs: [],
+          reviewRequestedPrsTotalCount: 0,
+          personalReviewRequestedPrs: [],
+          personalReviewRequestsTotalCount: 0,
+        }),
+      resolveRepoMeta: () => Promise.resolve(new Map()),
+      fetchMergeQueue: () => Promise.resolve([]),
+      fetchDefaultBranchHead: () =>
+        Promise.resolve({ branch: "main", sha: "abc123", checks: [] }),
+      fetchDefaultBranchRecentRuns: () => Promise.resolve([]),
+      listCircleConfigFiles: () =>
+        Promise.resolve([{ path: ".circleci/config.yml", content: CIRCLE_CONFIG_YAML }]),
+      fetchTextFile: () => Promise.resolve(undefined),
+      fetchActionsWorkflows: () => Promise.resolve([]),
+      fetchLatestWorkflowRun: () => Promise.resolve(undefined),
+    };
+  }
+
+  function makeCircleWithInsights(): CircleCiClient {
+    return {
+      getPipelineByNumber: () => Promise.resolve(undefined),
+      getPipelineForSha: () => Promise.resolve(undefined),
+      getLatestPipelineForBranch: () => Promise.resolve(undefined),
+      listPipelinesForBranchSince: () => Promise.resolve([]),
+      getWorkflows: () => Promise.resolve([]),
+      getJobs: () => Promise.resolve([]),
+      getFailedTests: () => Promise.resolve([]),
+      getInsightsWorkflowNames: (_owner, _name) => Promise.resolve(["main"]),
+      getInsightsWorkflowRuns: (_owner, _name, wf) =>
+        Promise.resolve(
+          wf === "main"
+            ? [{ status: "success", created_at: "2026-06-20T00:00:00Z", stopped_at: "2026-06-20T00:01:00Z" }]
+            : [],
+        ),
+    };
+  }
+
+  test("folds expected scheduled workflows into defaultBranchJobs", async () => {
+    const snaps: DashboardSnapshot[] = [];
+    const poller = new DashboardPoller({
+      pinnedRepos: ["o/r"],
+      github: makeGitHubWithWorkflows(),
+      circle: makeCircleWithInsights(),
+      onSnapshot: (s) => snaps.push(s),
+    });
+
+    await poller.refreshGitHub();
+    await poller.refreshProjectWorkflows();
+
+    const jobs = snaps.at(-1)!.defaultBranchJobs;
+    const weekly = jobs.find((j) => j.name === "weekly");
+    expect(weekly).toBeTruthy();
+    expect(weekly!.scheduled).toBe(true);
+    expect(weekly!.lastRun!.found).toBe(false);
   });
 });

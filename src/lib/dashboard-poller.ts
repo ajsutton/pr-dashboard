@@ -34,6 +34,14 @@ import {
   type RawWorkflow,
 } from "./circleci.ts";
 import { buildChecksPipelineStatus, buildCircleDefaultBranchJobs, buildDefaultBranchJobs, mergePipelines, type CircleWorkflowRecord } from "./github-checks.ts";
+import {
+  scanCircleWorkflows,
+  buildCircleProjectWorkflows,
+  buildActionsProjectWorkflows,
+  mergeProjectWorkflows,
+  type ProjectWorkflow,
+  type ActionsWorkflowInput,
+} from "./project-workflows.ts";
 import type {
   CiPipelineStatus,
   DashboardSnapshot,
@@ -49,6 +57,8 @@ import type {
 const GITHUB_REFRESH_MS = 60_000;
 const CI_FAST_MS = 12_000;
 const CI_SLOW_MS = 60_000;
+const PROJECT_WORKFLOWS_MS = Number(process.env.DASHBOARD_PROJECT_WORKFLOWS_MS) || 300_000;
+const PROJECT_WORKFLOWS_ENABLED = process.env.DASHBOARD_PROJECT_WORKFLOWS !== "0";
 /** Window for the default-branch / projects view. Workflows whose latest run is older than this are dropped. */
 const DEFAULT_BRANCH_RUN_WINDOW_HOURS = 72;
 
@@ -105,6 +115,8 @@ export class DashboardPoller {
   private stopped = false;
   private githubTimer: ReturnType<typeof setTimeout> | null = null;
   private ciTimer: ReturnType<typeof setTimeout> | null = null;
+  private expectedByRepo = new Map<string, ProjectWorkflow[]>();
+  private projectWorkflowsTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: DashboardPollerOpts) {
     this.github = opts.github ?? new RealDashboardGitHubClient({ scopeRepos: opts.scopeRepos ?? [] });
@@ -120,6 +132,10 @@ export class DashboardPoller {
     this.scheduleGitHub();
     await this.refreshCi();
     this.scheduleCi();
+    if (PROJECT_WORKFLOWS_ENABLED && this.pinnedRepos.length > 0) {
+      await this.refreshProjectWorkflows();
+      this.scheduleProjectWorkflows();
+    }
     this.log("start: complete");
   }
 
@@ -127,6 +143,7 @@ export class DashboardPoller {
     this.stopped = true;
     if (this.githubTimer) clearTimeout(this.githubTimer);
     if (this.ciTimer) clearTimeout(this.ciTimer);
+    if (this.projectWorkflowsTimer) clearTimeout(this.projectWorkflowsTimer);
   }
 
   private scheduleGitHub(): void {
@@ -145,6 +162,67 @@ export class DashboardPoller {
       await this.refreshCi();
       this.scheduleCi();
     }, delay);
+  }
+
+  private scheduleProjectWorkflows(): void {
+    if (this.stopped) return;
+    this.projectWorkflowsTimer = setTimeout(async () => {
+      await this.refreshProjectWorkflows();
+      this.scheduleProjectWorkflows();
+    }, PROJECT_WORKFLOWS_MS);
+  }
+
+  /**
+   * Slow loop: for each pinned repo, build the expected workflow set from the
+   * committed CircleCI config (∪ Insights actuals) plus the GitHub Actions
+   * workflows list. Best-effort; folded into defaultBranchJobs on broadcast.
+   */
+  async refreshProjectWorkflows(): Promise<void> {
+    const next = new Map<string, ProjectWorkflow[]>();
+    await Promise.all(
+      this.pinnedRepos.map(async (repo) => {
+        const list: ProjectWorkflow[] = [];
+        const [owner, name] = repo.split("/");
+        if (!owner || !name) return;
+        // CircleCI
+        try {
+          const files = await this.github.listCircleConfigFiles(repo);
+          const defined = scanCircleWorkflows(files);
+          const ranNames = await this.circle.getInsightsWorkflowNames(owner, name);
+          const runsByName: Record<string, import("./project-workflows.ts").RawInsightsRun[]> = {};
+          await Promise.all(
+            ranNames.map(async (wf) => {
+              runsByName[wf] = await this.circle.getInsightsWorkflowRuns(owner, name, wf);
+            }),
+          );
+          list.push(
+            ...buildCircleProjectWorkflows({
+              repo, org: owner, defined, ranWorkflowNames: new Set(ranNames), runsByName,
+            }),
+          );
+        } catch (err) {
+          this.errors.push(`project-workflows circle ${repo}: ${String(err)}`);
+        }
+        // GitHub Actions
+        try {
+          const workflows = await this.github.fetchActionsWorkflows(repo);
+          const inputs: ActionsWorkflowInput[] = await Promise.all(
+            workflows.map(async (w) => ({
+              workflow: w,
+              fileContent: w.path ? await this.github.fetchTextFile(repo, w.path) : undefined,
+              latestRun: await this.github.fetchLatestWorkflowRun(repo, w.id),
+            })),
+          );
+          list.push(...buildActionsProjectWorkflows(repo, inputs));
+        } catch (err) {
+          this.errors.push(`project-workflows actions ${repo}: ${String(err)}`);
+        }
+        next.set(repo, list);
+      }),
+    );
+    this.expectedByRepo = next;
+    this.attachCiToCards();
+    this.broadcast();
   }
 
   private anyCiRunning(): boolean {
@@ -347,6 +425,16 @@ export class DashboardPoller {
       }
     }
     this.defaultBranchJobs = jobs;
+
+    // Fold expected/scheduled workflows from the slow loop into the job list.
+    const expected: ProjectWorkflow[] = [];
+    for (const repo of this.pinnedRepos) {
+      const e = this.expectedByRepo.get(repo);
+      if (e) expected.push(...e);
+    }
+    if (expected.length > 0) {
+      this.defaultBranchJobs = mergeProjectWorkflows(this.defaultBranchJobs, expected);
+    }
 
     // Attach CI to each merge queue entry using its head merge commit.
     for (const q of this.mergeQueues) {
