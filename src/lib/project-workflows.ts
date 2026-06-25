@@ -244,9 +244,8 @@ export function mergeProjectWorkflows(
     const k = keyOf(e.repo, e.provider, e.name);
     const existing = byKey.get(k);
     if (existing) {
-      existing.expected = true;
-      existing.scheduled = e.scheduled;
-      if (e.disabledState) existing.disabledState = e.disabledState;
+      // Annotate without mutating the input: emit a fresh copy.
+      byKey.set(k, { ...existing, expected: true, scheduled: e.scheduled, disabledState: e.disabledState });
     } else {
       byKey.set(k, {
         key: k,

@@ -99,6 +99,7 @@ describe("buildDefaultBranchJobs", () => {
     expect(out.length).toBe(2);
     const ci = out.find((j) => j.name === "CI")!;
     expect(ci.key).toBe("o/r::wf-1");
+    // builder always sets latest when it pushes a job
     expect(ci.latest!.url).toBe("u-ci-1");
     const watchdog = out.find((j) => j.name === "TODO Issue Watchdog")!;
     expect(watchdog.key).toBe("o/r::wf-2");
