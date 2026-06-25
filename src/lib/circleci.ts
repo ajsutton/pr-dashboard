@@ -7,6 +7,7 @@
 
 import type { CiJobStatus, CiPipelineStatus, CiWorkflowStatus } from "../types.ts";
 import { debugLog, truncateBody } from "./debug.ts";
+import type { RawInsightsRun } from "./project-workflows.ts";
 
 const BASE = "https://circleci.com/api/v2";
 
@@ -101,6 +102,8 @@ export interface CircleCiClient {
   getWorkflows(pipelineId: string): Promise<RawWorkflow[]>;
   getJobs(workflowId: string): Promise<RawJob[]>;
   getFailedTests(org: string, repo: string, jobNumber: number): Promise<string[]>;
+  getInsightsWorkflowNames(org: string, repo: string): Promise<string[]>;
+  getInsightsWorkflowRuns(org: string, repo: string, workflowName: string): Promise<RawInsightsRun[]>;
 }
 
 export interface RawPipeline {
@@ -233,6 +236,20 @@ export class RealCircleCiClient implements CircleCiClient {
     return tests
       .filter((t) => t.result === "failure" || t.result === "error")
       .map((t) => (t.classname ? `${t.classname}::${t.name}` : t.name));
+  }
+
+  async getInsightsWorkflowNames(org: string, repo: string): Promise<string[]> {
+    const data = await this.get<{ items?: Array<{ name?: string }> }>(
+      `/insights/gh/${org}/${repo}/workflows?reporting-window=last-90-days`,
+    );
+    return (data?.items ?? []).map((i) => i.name ?? "").filter(Boolean);
+  }
+
+  async getInsightsWorkflowRuns(org: string, repo: string, workflowName: string): Promise<RawInsightsRun[]> {
+    const data = await this.get<{ items?: Array<{ status?: string; created_at?: string; stopped_at?: string }> }>(
+      `/insights/gh/${org}/${repo}/workflows/${encodeURIComponent(workflowName)}?reporting-window=last-90-days`,
+    );
+    return (data?.items ?? []).map((i) => ({ status: i.status ?? "", created_at: i.created_at, stopped_at: i.stopped_at }));
   }
 }
 
