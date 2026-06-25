@@ -161,7 +161,7 @@ export interface ActionsWorkflowInput {
 }
 
 function mapActionsStatus(status: string, conclusion: string | null | undefined): CiJobStatusValue {
-  const s = (status ?? "").toLowerCase();
+  const s = status.toLowerCase();
   const c = (conclusion ?? "").toLowerCase();
   if (s === "completed") {
     switch (c) {
@@ -191,6 +191,7 @@ function actionsScheduled(fileContent: string | undefined): boolean {
   if (!fileContent) return false;
   let doc: unknown;
   try {
+    // Detection relies on the YAML parser treating bare `on` as the string key "on" (YAML 1.2 semantics).
     doc = Bun.YAML.parse(fileContent);
   } catch {
     return /^\s*schedule\s*:/m.test(fileContent);

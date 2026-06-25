@@ -123,4 +123,48 @@ describe("buildActionsProjectWorkflows", () => {
     ]);
     expect(out[0]!.disabledState).toBe("disabled_inactivity");
   });
+
+  test("mapActionsStatus: completed + various conclusions → correct status", () => {
+    const cases: Array<[status: string, conclusion: string | null | undefined, expected: string]> = [
+      ["completed", "failure", "failed"],
+      ["completed", "timed_out", "failed"],
+      ["completed", "startup_failure", "failed"],
+      ["completed", "action_required", "failed"],
+      ["completed", "cancelled", "canceled"],
+      ["completed", "stale", "blocked"],
+      ["completed", "neutral", "success"],
+      ["completed", "skipped", "success"],
+      ["completed", "weird", "unknown"],
+      ["completed", null, "unknown"],
+    ];
+    for (const [status, conclusion, expected] of cases) {
+      const out = buildActionsProjectWorkflows("o/r", [
+        {
+          workflow: { id: 1, name: "Test", path: ".github/workflows/test.yml", state: "active" },
+          latestRun: { status, conclusion, updated_at: "2026-06-20T00:00:00Z", html_url: "https://x" },
+        },
+      ]);
+      expect(out[0]!.lastRun.status).toBe(expected);
+    }
+  });
+
+  test("mapActionsStatus: in_progress and queued statuses → correct status", () => {
+    const cases: Array<[status: string, expected: string]> = [
+      ["in_progress", "running"],
+      ["queued", "queued"],
+      ["pending", "queued"],
+      ["waiting", "queued"],
+      ["requested", "queued"],
+      ["unknown_status", "unknown"],
+    ];
+    for (const [status, expected] of cases) {
+      const out = buildActionsProjectWorkflows("o/r", [
+        {
+          workflow: { id: 1, name: "Test", path: ".github/workflows/test.yml", state: "active" },
+          latestRun: { status, conclusion: null, updated_at: "2026-06-20T00:00:00Z", html_url: "https://x" },
+        },
+      ]);
+      expect(out[0]!.lastRun.status).toBe(expected);
+    }
+  });
 });
