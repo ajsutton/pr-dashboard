@@ -274,6 +274,10 @@ describe("DashboardPoller refresh resilience", () => {
       fetchMergeQueue: () => Promise.resolve([]),
       fetchDefaultBranchHead: () => Promise.resolve(undefined),
       fetchDefaultBranchRecentRuns: () => Promise.resolve([]),
+      listCircleConfigFiles: () => Promise.resolve([]),
+      fetchTextFile: () => Promise.resolve(undefined),
+      fetchActionsWorkflows: () => Promise.resolve([]),
+      fetchLatestWorkflowRun: () => Promise.resolve(undefined),
     };
   }
 
