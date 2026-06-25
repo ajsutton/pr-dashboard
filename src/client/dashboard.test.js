@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect, test } from 'bun:test';
 import { prActionRank, sortStacks, computeVisibleStacks } from './dashboard-sort.js';
+import { renderJobCard } from "./dashboard.js";
 
 const mkPr = (overrides = {}) => ({
   key: overrides.key ?? `o/r#${overrides.number ?? 1}`,
@@ -154,5 +155,36 @@ describe('computeVisibleStacks', () => {
 
   it('tolerates missing prs/stacks fields', () => {
     expect(computeVisibleStacks({})).toEqual([]);
+  });
+});
+
+describe("renderJobCard expected/scheduled states", () => {
+  test("older last run shows age + status, no progress bar", () => {
+    const html = renderJobCard({
+      key: "o/r::circleci::weekly", repo: "o/r", branch: "", name: "weekly",
+      provider: "circleci", expected: true, scheduled: true,
+      lastRun: { found: true, status: "success", at: new Date(Date.now() - 9 * 86400000).toISOString(), url: "u" },
+    });
+    expect(html).toContain("weekly");
+    expect(html).toContain("9d");
+    expect(html).not.toContain("db-bar-fill");
+    expect(html).toContain("db-job-sched"); // scheduled badge marker
+  });
+
+  test("never run shows 'last run not found'", () => {
+    const html = renderJobCard({
+      key: "o/r::circleci::weekly", repo: "o/r", branch: "", name: "weekly",
+      provider: "circleci", expected: true, scheduled: true,
+      lastRun: { found: false },
+    });
+    expect(html).toContain("last run not found");
+  });
+
+  test("in-window run still renders the normal card", () => {
+    const html = renderJobCard({
+      key: "o/r::circleci::main", repo: "o/r", branch: "develop", name: "main", provider: "circleci",
+      latest: { status: "running", url: "u", headSha: "s", startedAt: new Date().toISOString(), elapsedMs: 1000, progressPct: 42 },
+    });
+    expect(html).toContain("db-bar-fill");
   });
 });
