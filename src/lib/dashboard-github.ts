@@ -975,7 +975,7 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
     const head = await this.fetchDefaultBranchHead(repo);
     if (!head) return [];
     const tree = (await ghRest(
-      `/repos/${owner}/${name}/git/trees/${encodeURIComponent(head.branch)}?recursive=1`,
+      `/repos/${owner}/${name}/git/trees/${head.sha}?recursive=1`,
     )) as { tree?: Array<{ path?: string; type?: string }> } | undefined;
     const paths = (tree?.tree ?? [])
       .filter((t) => t.type === "blob" && typeof t.path === "string"

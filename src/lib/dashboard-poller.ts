@@ -41,6 +41,8 @@ import {
   mergeProjectWorkflows,
   type ProjectWorkflow,
   type ActionsWorkflowInput,
+  type DefinedWorkflow,
+  type RawInsightsRun,
 } from "./project-workflows.ts";
 import type {
   CiPipelineStatus,
@@ -118,6 +120,17 @@ export class DashboardPoller {
   private expectedByRepo = new Map<string, ProjectWorkflow[]>();
   private projectWorkflowsTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /** Parsed CircleCI workflow set per repo, keyed by the repo's default-branch
+   *  head SHA — reused across slow ticks while the committed config is unchanged. */
+  private circleConfigCache = new Map<string, { sha: string; defined: DefinedWorkflow[] }>();
+  /** GitHub Actions workflow file bodies per repo (for on:schedule detection),
+   *  keyed by head SHA. */
+  private actionsFileCache = new Map<string, { sha: string; byPath: Map<string, string> }>();
+
+  private headShaFor(repo: string): string | undefined {
+    return this.defaultBranchSeed.find((d) => d.repo === repo)?.sha;
+  }
+
   constructor(opts: DashboardPollerOpts) {
     this.github = opts.github ?? new RealDashboardGitHubClient({ scopeRepos: opts.scopeRepos ?? [] });
     this.circle = opts.circle ?? new RealCircleCiClient();
@@ -184,12 +197,23 @@ export class DashboardPoller {
         const list: ProjectWorkflow[] = [];
         const [owner, name] = repo.split("/");
         if (!owner || !name) return;
+        const sha = this.headShaFor(repo);
         // CircleCI
         try {
-          const files = await this.github.listCircleConfigFiles(repo);
-          const defined = scanCircleWorkflows(files);
+          // Config rarely changes — reuse the parsed workflow set while the
+          // default-branch head SHA is unchanged; only the last-run data
+          // (Insights) is refetched every tick.
+          let defined: DefinedWorkflow[];
+          const cached = this.circleConfigCache.get(repo);
+          if (sha && cached && cached.sha === sha) {
+            defined = cached.defined;
+          } else {
+            const files = await this.github.listCircleConfigFiles(repo);
+            defined = scanCircleWorkflows(files);
+            if (sha) this.circleConfigCache.set(repo, { sha, defined });
+          }
           const ranNames = await this.circle.getInsightsWorkflowNames(owner, name);
-          const runsByName: Record<string, import("./project-workflows.ts").RawInsightsRun[]> = {};
+          const runsByName: Record<string, RawInsightsRun[]> = {};
           await Promise.all(
             ranNames.map(async (wf) => {
               runsByName[wf] = await this.circle.getInsightsWorkflowRuns(owner, name, wf);
@@ -206,12 +230,29 @@ export class DashboardPoller {
         // GitHub Actions
         try {
           const workflows = await this.github.fetchActionsWorkflows(repo);
+          // Workflow file bodies (used only for on:schedule detection) change
+          // rarely — cache them per head SHA so each tick only refetches the
+          // cheap workflow list + each workflow's latest run.
+          let fileCache = this.actionsFileCache.get(repo);
+          if (!fileCache || fileCache.sha !== (sha ?? "")) {
+            fileCache = { sha: sha ?? "", byPath: new Map() };
+            if (sha) this.actionsFileCache.set(repo, fileCache);
+          }
           const inputs: ActionsWorkflowInput[] = await Promise.all(
-            workflows.map(async (w) => ({
-              workflow: w,
-              fileContent: w.path ? await this.github.fetchTextFile(repo, w.path) : undefined,
-              latestRun: await this.github.fetchLatestWorkflowRun(repo, w.id),
-            })),
+            workflows.map(async (w) => {
+              let fileContent: string | undefined;
+              if (w.path) {
+                const cachedContent = fileCache!.byPath.get(w.path);
+                if (cachedContent !== undefined) {
+                  fileContent = cachedContent;
+                } else {
+                  fileContent = await this.github.fetchTextFile(repo, w.path);
+                  if (sha && fileContent != null) fileCache!.byPath.set(w.path, fileContent);
+                }
+              }
+              const latestRun = await this.github.fetchLatestWorkflowRun(repo, w.id);
+              return { workflow: w, fileContent, latestRun };
+            }),
           );
           list.push(...buildActionsProjectWorkflows(repo, inputs));
         } catch (err) {
