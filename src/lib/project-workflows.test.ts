@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { scanCircleWorkflows, type CircleConfigFile, buildCircleProjectWorkflows } from "./project-workflows.ts";
+import { scanCircleWorkflows, type CircleConfigFile, buildCircleProjectWorkflows, buildActionsProjectWorkflows } from "./project-workflows.ts";
 
 describe("scanCircleWorkflows", () => {
   test("unions workflow names across files, excludes version, dedupes", () => {
@@ -85,5 +85,42 @@ describe("buildCircleProjectWorkflows", () => {
     });
     expect(out.map((w) => w.name)).toEqual(["setup"]);
     expect(out[0]!.lastRun.found).toBe(true);
+  });
+});
+
+describe("buildActionsProjectWorkflows", () => {
+  test("maps latest run conclusion + time + url", () => {
+    const out = buildActionsProjectWorkflows("o/r", [
+      {
+        workflow: { id: 1, name: "CI", path: ".github/workflows/ci.yml", state: "active" },
+        fileContent: "on:\n  push:\n",
+        latestRun: { status: "completed", conclusion: "success", updated_at: "2026-06-20T00:05:00Z", html_url: "https://x/run/1" },
+      },
+    ]);
+    expect(out[0]!).toMatchObject({
+      repo: "o/r",
+      provider: "github",
+      name: "CI",
+      scheduled: false,
+      lastRun: { found: true, status: "success", at: "2026-06-20T00:05:00Z", url: "https://x/run/1" },
+    });
+  });
+
+  test("on: schedule in the file marks it scheduled", () => {
+    const out = buildActionsProjectWorkflows("o/r", [
+      {
+        workflow: { id: 2, name: "Nightly", path: ".github/workflows/nightly.yml", state: "active" },
+        fileContent: "on:\n  schedule:\n    - cron: '0 0 * * *'\n",
+        latestRun: undefined,
+      },
+    ]);
+    expect(out[0]!).toMatchObject({ name: "Nightly", scheduled: true, lastRun: { found: false } });
+  });
+
+  test("carries disabled state", () => {
+    const out = buildActionsProjectWorkflows("o/r", [
+      { workflow: { id: 3, name: "Old", path: ".github/workflows/old.yml", state: "disabled_inactivity" }, latestRun: undefined },
+    ]);
+    expect(out[0]!.disabledState).toBe("disabled_inactivity");
   });
 });

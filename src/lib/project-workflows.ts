@@ -138,3 +138,87 @@ export function buildCircleProjectWorkflows(args: {
   }
   return out;
 }
+
+export interface RawActionsWorkflow {
+  id: number;
+  name: string;
+  path: string;
+  state: string;
+}
+
+export interface RawActionsRun {
+  status: string;
+  conclusion?: string | null | undefined;
+  updated_at?: string | undefined;
+  created_at?: string | undefined;
+  html_url?: string | undefined;
+}
+
+export interface ActionsWorkflowInput {
+  workflow: RawActionsWorkflow;
+  fileContent?: string | undefined;
+  latestRun?: RawActionsRun | undefined;
+}
+
+function mapActionsStatus(status: string, conclusion: string | null | undefined): CiJobStatusValue {
+  const s = (status ?? "").toLowerCase();
+  const c = (conclusion ?? "").toLowerCase();
+  if (s === "completed") {
+    switch (c) {
+      case "success":
+      case "neutral":
+      case "skipped":
+        return "success";
+      case "failure":
+      case "timed_out":
+      case "startup_failure":
+      case "action_required":
+        return "failed";
+      case "cancelled":
+        return "canceled";
+      case "stale":
+        return "blocked";
+      default:
+        return "unknown";
+    }
+  }
+  if (s === "in_progress") return "running";
+  if (s === "queued" || s === "pending" || s === "waiting" || s === "requested") return "queued";
+  return "unknown";
+}
+
+function actionsScheduled(fileContent: string | undefined): boolean {
+  if (!fileContent) return false;
+  let doc: unknown;
+  try {
+    doc = Bun.YAML.parse(fileContent);
+  } catch {
+    return /^\s*schedule\s*:/m.test(fileContent);
+  }
+  const on = (doc as Record<string, unknown> | null)?.["on"];
+  if (on && typeof on === "object" && "schedule" in (on as object)) return true;
+  return false;
+}
+
+export function buildActionsProjectWorkflows(repo: string, inputs: ActionsWorkflowInput[]): ProjectWorkflow[] {
+  return inputs.map(({ workflow, fileContent, latestRun }) => {
+    const lastRun: ProjectLastRun = latestRun
+      ? {
+          found: true,
+          status: mapActionsStatus(latestRun.status, latestRun.conclusion),
+          at: latestRun.updated_at ?? latestRun.created_at,
+          url: latestRun.html_url,
+        }
+      : { found: false };
+    const disabledState =
+      workflow.state === "disabled_manually" || workflow.state === "disabled_inactivity" ? workflow.state : undefined;
+    return {
+      repo,
+      provider: "github" as const,
+      name: workflow.name,
+      scheduled: actionsScheduled(fileContent),
+      disabledState,
+      lastRun,
+    };
+  });
+}
