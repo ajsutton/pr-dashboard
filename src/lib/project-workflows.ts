@@ -156,6 +156,17 @@ export interface ActionsWorkflowInput {
   latestRun?: RawActionsRun | undefined;
 }
 
+/**
+ * True when a GitHub Actions workflow is defined by a committed file in the
+ * repo (`.github/workflows/…`). The Actions API also returns GitHub-managed
+ * "dynamic" workflows (path `dynamic/…`, e.g. Copilot code review, default
+ * CodeQL setup, Dependabot) that aren't in the codebase; those are excluded so
+ * the Projects view shows only code-defined workflows.
+ */
+export function isCodeDefinedWorkflowPath(path: string | undefined): boolean {
+  return !!path && path.startsWith(".github/workflows/");
+}
+
 function mapActionsStatus(status: string, conclusion: string | null | undefined): CiJobStatusValue {
   const s = status.toLowerCase();
   const c = (conclusion ?? "").toLowerCase();

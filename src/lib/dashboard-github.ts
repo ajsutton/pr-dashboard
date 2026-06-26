@@ -7,6 +7,7 @@
 import type { PrCard, MergeQueueEntry } from "../types.ts";
 import { debugLog, summarizeQuery, truncateBody } from "./debug.ts";
 import type { CircleConfigFile, RawActionsWorkflow, RawActionsRun } from "./project-workflows.ts";
+import { isCodeDefinedWorkflowPath } from "./project-workflows.ts";
 
 export interface RawCheckContext {
   __typename: "CheckRun" | "StatusContext" | string;
@@ -1007,7 +1008,7 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
       | { workflows?: Array<{ id?: number; name?: string; path?: string; state?: string }> }
       | undefined;
     return (data?.workflows ?? [])
-      .filter((w) => typeof w.id === "number")
+      .filter((w) => typeof w.id === "number" && isCodeDefinedWorkflowPath(w.path))
       .map((w) => ({ id: w.id as number, name: w.name ?? "", path: w.path ?? "", state: w.state ?? "active" }));
   }
 
@@ -1051,6 +1052,9 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
       for (const r of runs) {
         const workflowId = (r["workflow_id"] as number) ?? 0;
         if (!workflowId) continue;
+        // Skip GitHub-managed dynamic workflows (Dependabot, CodeQL default
+        // setup, Copilot, …); the Projects board shows code-defined workflows.
+        if (!isCodeDefinedWorkflowPath(r["path"] as string | undefined)) continue;
         out.push({
           workflowId,
           workflowName: (r["name"] as string) ?? "",

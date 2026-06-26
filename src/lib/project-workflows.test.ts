@@ -1,7 +1,25 @@
 import { describe, expect, test } from "bun:test";
-import { scanCircleWorkflows, type CircleConfigFile, buildCircleProjectWorkflows, buildActionsProjectWorkflows, mergeProjectWorkflows } from "./project-workflows.ts";
+import { scanCircleWorkflows, type CircleConfigFile, buildCircleProjectWorkflows, buildActionsProjectWorkflows, mergeProjectWorkflows, isCodeDefinedWorkflowPath } from "./project-workflows.ts";
 import type { DefaultBranchJob } from "../types.ts";
 import type { ProjectWorkflow } from "./project-workflows.ts";
+
+describe("isCodeDefinedWorkflowPath", () => {
+  test("accepts committed .github/workflows files", () => {
+    expect(isCodeDefinedWorkflowPath(".github/workflows/ci.yml")).toBe(true);
+    expect(isCodeDefinedWorkflowPath(".github/workflows/security.yaml")).toBe(true);
+  });
+
+  test("rejects GitHub-managed dynamic workflows", () => {
+    expect(isCodeDefinedWorkflowPath("dynamic/copilot-pull-request-reviewer/copilot")).toBe(false);
+    expect(isCodeDefinedWorkflowPath("dynamic/github-code-scanning/codeql")).toBe(false);
+    expect(isCodeDefinedWorkflowPath("dynamic/dependabot/dependabot-updates")).toBe(false);
+  });
+
+  test("rejects empty/undefined paths", () => {
+    expect(isCodeDefinedWorkflowPath("")).toBe(false);
+    expect(isCodeDefinedWorkflowPath(undefined)).toBe(false);
+  });
+});
 
 describe("scanCircleWorkflows", () => {
   test("unions workflow names across files, excludes version, dedupes", () => {
