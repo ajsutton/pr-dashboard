@@ -1004,11 +1004,26 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
   async fetchActionsWorkflows(repo: string): Promise<RawActionsWorkflow[]> {
     const [owner, name] = repo.split("/");
     if (!owner || !name) return [];
+    // The Actions API lists DELETED workflows as `state: "active"` with their
+    // old `.github/workflows/` path, so it can't be trusted as "what's in the
+    // repo". Intersect it with the workflow files that actually exist on the
+    // default-branch tree.
+    const head = await this.fetchDefaultBranchHead(repo);
+    if (!head) return [];
+    const tree = (await ghRest(`/repos/${owner}/${name}/git/trees/${head.sha}?recursive=1`)) as
+      | { tree?: Array<{ path?: string; type?: string }> }
+      | undefined;
+    const realPaths = new Set(
+      (tree?.tree ?? [])
+        .filter((t) => t.type === "blob" && isCodeDefinedWorkflowPath(t.path))
+        .map((t) => t.path as string),
+    );
+    if (realPaths.size === 0) return [];
     const data = (await ghRest(`/repos/${owner}/${name}/actions/workflows?per_page=100`)) as
       | { workflows?: Array<{ id?: number; name?: string; path?: string; state?: string }> }
       | undefined;
     return (data?.workflows ?? [])
-      .filter((w) => typeof w.id === "number" && isCodeDefinedWorkflowPath(w.path))
+      .filter((w) => typeof w.id === "number" && typeof w.path === "string" && realPaths.has(w.path))
       .map((w) => ({ id: w.id as number, name: w.name ?? "", path: w.path ?? "", state: w.state ?? "active" }));
   }
 
