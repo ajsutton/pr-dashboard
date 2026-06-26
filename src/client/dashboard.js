@@ -766,8 +766,9 @@ function renderJobs(snap) {
     return;
   }
   // Flat grid across all repos. Sort by category (failures first, then
-  // cancelled, in-progress, scheduled-never-run, never-run, passing), then
-  // most-recent run first, then server repo order, then workflow name.
+  // cancelled, in-progress, scheduled-never-run, passing, other, and finally
+  // non-scheduled never-run), then most-recent run first, then server repo
+  // order, then workflow name.
   const repoOrder = new Map((snap.repos ?? []).map((r, i) => [r, i]));
   const sorted = [...jobs].sort((a, b) => projectJobCompare(a, b, repoOrder));
   jobsEl.innerHTML = `<div class="db-jobs-grid">${sorted.map(renderJobCard).join("")}</div>`;

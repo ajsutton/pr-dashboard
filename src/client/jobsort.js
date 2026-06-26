@@ -3,10 +3,10 @@
  *   0 failed      — last settled result failed/blocked (incl. an old recorded run)
  *   1 cancelled   — last settled result cancelled
  *   2 in progress — currently running or queued
- *   3 scheduled, never run
- *   4 never run (not scheduled)
- *   5 passing     — last settled result success
- *   6 other       — ran, but status unknown / unclassified
+ *   3 scheduled, never run — kept high so a never-fired schedule stands out
+ *   4 passing     — last settled result success
+ *   5 other       — ran, but status unknown / unclassified
+ *   6 never run (not scheduled) — least interesting; dropped to the end
  *
  * The last settled result (last completed in-window run, or the long-lookback
  * recorded run) drives fail/cancel/pass; the in-flight run drives "in progress".
@@ -19,9 +19,11 @@ export function jobCategory(job) {
   if (terminal === "failed" || terminal === "blocked") return 0;
   if (terminal === "canceled") return 1;
   if (live === "running" || live === "queued") return 2;
-  if (!everRan) return job.scheduled ? 3 : 4;
-  if (terminal === "success") return 5;
-  return 6;
+  // A scheduled workflow that has never run stays high (rank 3) so a never-fired
+  // schedule is visible; a non-scheduled never-run workflow drops to the very end.
+  if (!everRan) return job.scheduled ? 3 : 6;
+  if (terminal === "success") return 4;
+  return 5;
 }
 
 /**

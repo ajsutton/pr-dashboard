@@ -32,21 +32,21 @@ describe("jobCategory", () => {
     expect(jobCategory(recent("queued", undefined))).toBe(2);
   });
 
-  test("scheduled but never run ranks 3", () => {
+  test("scheduled but never run stays high at rank 3", () => {
     expect(jobCategory(expected({ found: false }, { scheduled: true }))).toBe(3);
   });
 
-  test("never run (not scheduled) ranks 4", () => {
-    expect(jobCategory(expected({ found: false }, { scheduled: false }))).toBe(4);
+  test("passing last result ranks 4", () => {
+    expect(jobCategory(recent("success", "success"))).toBe(4);
+    expect(jobCategory(expected({ found: true, status: "success", at: "2026-06-01T00:00:00Z" }))).toBe(4);
   });
 
-  test("passing last result ranks 5", () => {
-    expect(jobCategory(recent("success", "success"))).toBe(5);
-    expect(jobCategory(expected({ found: true, status: "success", at: "2026-06-01T00:00:00Z" }))).toBe(5);
+  test("ran with an unknown status falls through to other (5)", () => {
+    expect(jobCategory(expected({ found: true, status: "unknown", at: "2026-06-01T00:00:00Z" }))).toBe(5);
   });
 
-  test("ran with an unknown status falls through to other (6)", () => {
-    expect(jobCategory(expected({ found: true, status: "unknown", at: "2026-06-01T00:00:00Z" }))).toBe(6);
+  test("never run (not scheduled) drops to the very end (6)", () => {
+    expect(jobCategory(expected({ found: false }, { scheduled: false }))).toBe(6);
   });
 
   test("full category ordering", () => {
@@ -54,11 +54,11 @@ describe("jobCategory", () => {
     const cancelled = recent("canceled", "canceled");
     const inProgress = recent("running", "success");
     const schedNever = expected({ found: false }, { scheduled: true });
-    const neverRun = expected({ found: false }, { scheduled: false });
     const passing = recent("success", "success");
-    const shuffled = [passing, neverRun, schedNever, inProgress, cancelled, failed];
+    const neverRun = expected({ found: false }, { scheduled: false });
+    const shuffled = [neverRun, passing, schedNever, inProgress, cancelled, failed];
     const sorted = [...shuffled].sort((a, b) => jobCategory(a) - jobCategory(b));
-    expect(sorted).toEqual([failed, cancelled, inProgress, schedNever, neverRun, passing]);
+    expect(sorted).toEqual([failed, cancelled, inProgress, schedNever, passing, neverRun]);
   });
 });
 
