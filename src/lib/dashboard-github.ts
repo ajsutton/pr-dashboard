@@ -44,6 +44,10 @@ export interface RawPr {
   updatedAt: string;
   reviews: { login: string; state: string; submittedAt: string }[];
   reviewRequested: string[];
+  /** Paths changed by the PR, used to evaluate file-scoped review rulesets. */
+  changedFiles: string[];
+  /** Active/inactive rulesets returned with the PR's repository node. */
+  rulesets: RawRuleset[];
   associatedOnBase: { repo: string; number: number; state: string; headRefName: string }[];
   checks: RawCheckContext[];
 }
@@ -307,7 +311,34 @@ const CONTEXT_NODE_FIELDS = `
  * shape regardless of how the PRs were fetched.
  */
 const PR_CORE_FIELDS = `
-  repository { nameWithOwner isArchived defaultBranchRef { name } }
+  repository {
+    nameWithOwner
+    isArchived
+    defaultBranchRef { name }
+    rulesets(first: 100, includeParents: true, targets: [BRANCH]) {
+      nodes {
+        target
+        enforcement
+        conditions {
+          ref_name: refName { include exclude }
+        }
+        rules(first: 100, type: PULL_REQUEST) {
+          nodes {
+            type
+            parameters {
+              ... on PullRequestParameters {
+                required_approving_review_count: requiredApprovingReviewCount
+                required_reviewers: requiredReviewers {
+                  minimum_approvals: minimumApprovals
+                  file_patterns: filePatterns
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
   number
   title
   url
@@ -328,12 +359,117 @@ const PR_CORE_FIELDS = `
   reviewRequests(first: 20) {
     nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } }
   }
+  files(first: 100) {
+    pageInfo { hasNextPage endCursor }
+    nodes { path }
+  }
   baseRef {
     associatedPullRequests(first: 20, states: [OPEN, MERGED], orderBy: {field: UPDATED_AT, direction: DESC}) {
       nodes { number state headRefName repository { nameWithOwner } }
     }
   }
 `;
+
+export interface RawRepositoryRule {
+  type?: string;
+  parameters?: {
+    required_approving_review_count?: number;
+    required_reviewers?: Array<{
+      minimum_approvals?: number;
+      file_patterns?: string[];
+    }>;
+  };
+}
+
+export interface RawRuleset {
+  target?: string;
+  enforcement?: string;
+  conditions?: { ref_name?: { include?: string[]; exclude?: string[] } };
+  rules?: { nodes?: RawRepositoryRule[] };
+}
+
+/** GitHub ruleset globs use pathname semantics: * does not cross a slash. */
+function matchesRulesetGlob(value: string, glob: string): boolean {
+  let pattern = "^";
+  for (let i = 0; i < glob.length; i++) {
+    const ch = glob[i]!;
+    if (ch === "*") {
+      if (glob[i + 1] === "*") {
+        // `**/` can span zero or more directories; a bare `**` spans any
+        // characters. This distinction matters for patterns such as
+        // `packages/contracts-bedrock/**/*.md`, which also excludes a markdown
+        // file directly under contracts-bedrock.
+        if (glob[i + 2] === "/") {
+          pattern += "(?:.*/)?";
+          i += 2;
+        } else {
+          pattern += ".*";
+          i++;
+        }
+      } else {
+        pattern += "[^/]*";
+      }
+    } else if (ch === "?") {
+      pattern += "[^/]";
+    } else {
+      pattern += ch.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+    }
+  }
+  return new RegExp(`${pattern}$`).test(value);
+}
+
+function filePatternsMatch(patterns: string[], paths: string[]): boolean {
+  if (patterns.length === 0) return true;
+  const positive = patterns.filter((p) => !p.startsWith("!"));
+  const negative = patterns.filter((p) => p.startsWith("!")).map((p) => p.slice(1));
+  return paths.some(
+    (path) =>
+      (positive.length === 0 || positive.some((p) => matchesRulesetGlob(path, p))) &&
+      !negative.some((p) => matchesRulesetGlob(path, p)),
+  );
+}
+
+function refPatternMatches(pattern: string, pr: RawPr): boolean {
+  if (pattern === "~ALL") return true;
+  if (pattern === "~DEFAULT_BRANCH") return pr.baseRefName === pr.defaultBranch;
+  return matchesRulesetGlob(`refs/heads/${pr.baseRefName}`, pattern);
+}
+
+function rulesetTargetsPr(ruleset: RawRuleset, pr: RawPr): boolean {
+  if (ruleset.target !== "BRANCH" || ruleset.enforcement !== "ACTIVE") return false;
+  const refs = ruleset.conditions?.ref_name;
+  const includes = refs?.include ?? ["~ALL"];
+  const excludes = refs?.exclude ?? [];
+  return includes.some((pattern) => refPatternMatches(pattern, pr)) &&
+    !excludes.some((pattern) => refPatternMatches(pattern, pr));
+}
+
+/**
+ * GitHub's PullRequest.reviewDecision can be null for the newer ruleset
+ * `required_reviewers` rule, even while that rule is blocking the PR. Fill in
+ * REVIEW_REQUIRED when GitHub's evaluated rules for the PR's base branch
+ * include an applicable review requirement. A non-empty GitHub decision
+ * always remains authoritative.
+ */
+export function applyRulesetReviewRequirements(prs: RawPr[]): void {
+  for (const pr of prs) {
+    if (pr.reviewDecision) continue;
+    const requiresReview = pr.rulesets.some((ruleset) => {
+      if (!rulesetTargetsPr(ruleset, pr)) return false;
+      return (ruleset.rules?.nodes ?? []).some((rule) => {
+        if (rule.type !== "PULL_REQUEST") return false;
+        const params = rule.parameters;
+        if ((params?.required_approving_review_count ?? 0) > 0) return true;
+        return (params?.required_reviewers ?? []).some(
+          (reviewer) =>
+            (reviewer.minimum_approvals ?? 0) > 0 &&
+            filePatternsMatch(reviewer.file_patterns ?? [], pr.changedFiles),
+        );
+      });
+    });
+    if (requiresReview) pr.reviewDecision = "REVIEW_REQUIRED";
+  }
+}
 
 /**
  * The check-rollup sub-selection. Inlined into the combined query (one
@@ -752,6 +888,7 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
         f.raw.checks.push(...more);
       }),
     );
+    applyRulesetReviewRequirements(raws);
     return this.assembleWorkload(raws, data!);
   }
 
@@ -777,6 +914,7 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
       raws.push(normalizePr(n));
     }
     await this.attachChecks(raws);
+    applyRulesetReviewRequirements(raws);
     return this.assembleWorkload(raws, searchData ?? {});
   }
 
@@ -1091,8 +1229,10 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
 }
 
 function normalizePr(n: Record<string, unknown>): RawPr {
-  const repo = ((n["repository"] as Record<string, unknown>)?.["nameWithOwner"] as string) ?? "";
-  const defaultBranch = (((n["repository"] as Record<string, unknown>)?.["defaultBranchRef"] as Record<string, unknown> | undefined)?.["name"] as string) ?? "";
+  const repository = n["repository"] as Record<string, unknown> | undefined;
+  const repo = (repository?.["nameWithOwner"] as string) ?? "";
+  const defaultBranch = ((repository?.["defaultBranchRef"] as Record<string, unknown> | undefined)?.["name"] as string) ?? "";
+  const rulesets = (((repository?.["rulesets"] as Record<string, unknown> | undefined)?.["nodes"] as RawRuleset[]) ?? []);
 
   const baseRef = n["baseRef"] as Record<string, unknown> | undefined;
   const assoc = baseRef?.["associatedPullRequests"] as Record<string, unknown> | undefined;
@@ -1118,6 +1258,11 @@ function normalizePr(n: Record<string, unknown>): RawPr {
       if (!reviewer) return "";
       return (reviewer["login"] as string) ?? (reviewer["name"] as string) ?? "";
     })
+    .filter(Boolean);
+
+  const fileNodes = ((n["files"] as Record<string, unknown> | undefined)?.["nodes"] as Array<Record<string, unknown>>) ?? [];
+  const changedFiles = fileNodes
+    .map((file) => (file["path"] as string) ?? "")
     .filter(Boolean);
 
   const commits = n["statusCheckRollup"] as Record<string, unknown> | undefined;
@@ -1151,6 +1296,8 @@ function normalizePr(n: Record<string, unknown>): RawPr {
     updatedAt: (n["updatedAt"] as string) ?? "",
     reviews,
     reviewRequested,
+    changedFiles,
+    rulesets,
     associatedOnBase,
     checks,
   };

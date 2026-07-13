@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
+  applyRulesetReviewRequirements,
   buildPrCards,
   buildStacks,
   ghGraphql,
@@ -30,6 +31,8 @@ function mkRaw(over: Partial<RawPr> & { repo: string; number: number; baseRefNam
     updatedAt: "2026-05-21T00:00:00Z",
     reviews: [],
     reviewRequested: [],
+    changedFiles: [],
+    rulesets: [],
     associatedOnBase: [],
     checks: [],
     ...over,
@@ -104,6 +107,77 @@ describe("buildPrCards", () => {
     expect(cards[0]!.autoMergeEnabled).toBe(true);
     expect(cards[1]!.autoMergeEnabled).toBe(false);
     expect(cards[2]!.autoMergeEnabled).toBe(false);
+  });
+});
+
+describe("applyRulesetReviewRequirements", () => {
+  const contractReviewRuleset = {
+    target: "BRANCH",
+    enforcement: "ACTIVE",
+    conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } },
+    rules: {
+      nodes: [{
+        type: "PULL_REQUEST",
+        parameters: {
+          required_approving_review_count: 1,
+          required_reviewers: [{
+            minimum_approvals: 2,
+            file_patterns: ["packages/contracts-bedrock/**", "!packages/contracts-bedrock/**/*.md"],
+          }],
+        },
+      }],
+    },
+  };
+
+  test("infers REVIEW_REQUIRED for optimism#21663's file-scoped required-reviewers rule", () => {
+    const pr = mkRaw({
+      repo: "ethereum-optimism/optimism",
+      number: 21663,
+      baseRefName: "develop",
+      defaultBranch: "develop",
+      headRefName: "aj/refactor/remove-cannon-kona-dev-feature",
+      reviewDecision: "",
+      changedFiles: ["packages/contracts-bedrock/src/libraries/DevFeatures.sol"],
+      rulesets: [contractReviewRuleset],
+    });
+
+    applyRulesetReviewRequirements([pr]);
+
+    expect(pr.reviewDecision).toBe("REVIEW_REQUIRED");
+  });
+
+  test("does not apply a file-scoped reviewer rule when only an excluded path changes", () => {
+    const pr = mkRaw({
+      repo: "o/r",
+      number: 2,
+      baseRefName: "main",
+      headRefName: "docs",
+      reviewDecision: "",
+      changedFiles: ["packages/contracts-bedrock/README.md"],
+    });
+    const fileOnlyRuleset = structuredClone(contractReviewRuleset);
+    fileOnlyRuleset.rules.nodes[0]!.parameters!.required_approving_review_count = 0;
+    pr.rulesets = [fileOnlyRuleset];
+
+    applyRulesetReviewRequirements([pr]);
+
+    expect(pr.reviewDecision).toBe("");
+  });
+
+  test("keeps GitHub's non-empty review decision authoritative", () => {
+    const pr = mkRaw({
+      repo: "o/r",
+      number: 3,
+      baseRefName: "main",
+      headRefName: "approved",
+      reviewDecision: "APPROVED",
+      changedFiles: ["packages/contracts-bedrock/src/Contract.sol"],
+      rulesets: [contractReviewRuleset],
+    });
+
+    applyRulesetReviewRequirements([pr]);
+
+    expect(pr.reviewDecision).toBe("APPROVED");
   });
 });
 
@@ -454,6 +528,10 @@ describe("fetchViewerWorkload (adaptive combined→split + repo scoping)", () =>
     // The query itself is unscoped (works for fine-grained PATs); no repo: qualifier.
     expect(queries[0]).not.toContain("repo:org/a");
     expect(queries[0]).toContain("pullRequests(first: 50");
+    expect(queries[0]).toContain("rulesets(first: 100");
+    // Rulesets are bundled into the PR GraphQL selection; no body-less REST
+    // request is made after the workload query.
+    expect(queries.every(Boolean)).toBe(true);
   });
 });
 

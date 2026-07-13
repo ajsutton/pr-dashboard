@@ -248,6 +248,8 @@ describe("DashboardPoller refresh resilience", () => {
       updatedAt: "2026-05-21T00:00:00Z",
       reviews: [],
       reviewRequested: [],
+      changedFiles: [],
+      rulesets: [],
       associatedOnBase: [],
       checks: [],
     };
