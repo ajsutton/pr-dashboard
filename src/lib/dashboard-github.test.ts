@@ -529,6 +529,7 @@ describe("fetchViewerWorkload (adaptive combined→split + repo scoping)", () =>
     expect(queries[0]).not.toContain("repo:org/a");
     expect(queries[0]).toContain("pullRequests(first: 50");
     expect(queries[0]).toContain("rulesets(first: 100");
+    expect(queries[0]).toContain("rules(first: 1, type: PULL_REQUEST)");
     // Rulesets are bundled into the PR GraphQL selection; no body-less REST
     // request is made after the workload query.
     expect(queries.every(Boolean)).toBe(true);

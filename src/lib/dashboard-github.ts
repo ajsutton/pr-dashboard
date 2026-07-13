@@ -322,7 +322,10 @@ const PR_CORE_FIELDS = `
         conditions {
           ref_name: refName { include exclude }
         }
-        rules(first: 100, type: PULL_REQUEST) {
+        # A ruleset can contain at most one rule of a given type. Keeping this
+        # at 1 is also essential for GitHub's static node-limit calculation:
+        # 50 PRs × 100 rulesets × 100 rules exceeded the 500k query ceiling.
+        rules(first: 1, type: PULL_REQUEST) {
           nodes {
             type
             parameters {
