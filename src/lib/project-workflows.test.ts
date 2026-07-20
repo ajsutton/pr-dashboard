@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { scanCircleWorkflows, type CircleConfigFile, buildCircleProjectWorkflows, buildActionsProjectWorkflows, mergeProjectWorkflows, isCodeDefinedWorkflowPath } from "./project-workflows.ts";
+import { scanCircleWorkflows, type CircleConfigFile, buildCircleProjectWorkflows, buildActionsProjectWorkflows, mergeProjectWorkflows, isCodeDefinedWorkflowPath, isPullRequestOnlyActionsWorkflow } from "./project-workflows.ts";
 import type { DefaultBranchJob } from "../types.ts";
 import type { ProjectWorkflow } from "./project-workflows.ts";
 
@@ -18,6 +18,37 @@ describe("isCodeDefinedWorkflowPath", () => {
   test("rejects empty/undefined paths", () => {
     expect(isCodeDefinedWorkflowPath("")).toBe(false);
     expect(isCodeDefinedWorkflowPath(undefined)).toBe(false);
+  });
+});
+
+describe("isPullRequestOnlyActionsWorkflow", () => {
+  test("excludes scalar PR-only triggers", () => {
+    expect(isPullRequestOnlyActionsWorkflow("on: pull_request\n")).toBe(true);
+  });
+
+  test("excludes PR, PR-target, and merge-group-only mappings", () => {
+    const content = [
+      "on:",
+      "  pull_request:",
+      "  pull_request_target:",
+      "  merge_group:",
+    ].join("\n");
+    expect(isPullRequestOnlyActionsWorkflow(content)).toBe(true);
+  });
+
+  test("excludes PR and merge-group-only sequences", () => {
+    expect(isPullRequestOnlyActionsWorkflow("on: [pull_request, merge_group]\n")).toBe(true);
+  });
+
+  test("keeps workflows with any non-PR trigger", () => {
+    expect(isPullRequestOnlyActionsWorkflow("on: [pull_request, push]\n")).toBe(false);
+  });
+
+  test("keeps missing, malformed, or unsupported trigger declarations", () => {
+    expect(isPullRequestOnlyActionsWorkflow(undefined)).toBe(false);
+    expect(isPullRequestOnlyActionsWorkflow("on: [\n")).toBe(false);
+    expect(isPullRequestOnlyActionsWorkflow("on: 123\n")).toBe(false);
+    expect(isPullRequestOnlyActionsWorkflow("name: no-triggers\n")).toBe(false);
   });
 });
 

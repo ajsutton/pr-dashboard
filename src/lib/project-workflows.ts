@@ -167,6 +167,35 @@ export function isCodeDefinedWorkflowPath(path: string | undefined): boolean {
   return !!path && path.startsWith(".github/workflows/");
 }
 
+const PULL_REQUEST_ONLY_EVENTS: Record<string, true> = {
+  pull_request: true,
+  pull_request_target: true,
+  merge_group: true,
+};
+
+function actionsWorkflowEvents(fileContent: string | undefined): Set<string> | undefined {
+  if (!fileContent) return undefined;
+  let doc: unknown;
+  try {
+    doc = Bun.YAML.parse(fileContent);
+  } catch {
+    return undefined;
+  }
+  const on = (doc as Record<string, unknown> | null)?.["on"];
+  if (typeof on === "string") return new Set([on]);
+  if (Array.isArray(on)) {
+    if (!on.every((event) => typeof event === "string")) return undefined;
+    return new Set(on);
+  }
+  if (on && typeof on === "object") return new Set(Object.keys(on));
+  return undefined;
+}
+
+export function isPullRequestOnlyActionsWorkflow(fileContent: string | undefined): boolean {
+  const events = actionsWorkflowEvents(fileContent);
+  return !!events?.size && [...events].every((event) => PULL_REQUEST_ONLY_EVENTS[event] === true);
+}
+
 function mapActionsStatus(status: string, conclusion: string | null | undefined): CiJobStatusValue {
   const s = status.toLowerCase();
   const c = (conclusion ?? "").toLowerCase();
