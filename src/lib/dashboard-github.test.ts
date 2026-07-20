@@ -310,6 +310,30 @@ describe("ghRest / ghGraphql (direct GitHub REST/GraphQL over fetch)", () => {
     expect(data).toEqual({ workflow_runs: [{ id: 1 }] });
   });
 
+  test("fetchLatestWorkflowRun filters and encodes the default branch", async () => {
+    stubFetch({
+      body: {
+        workflow_runs: [
+          {
+            status: "completed",
+            conclusion: "success",
+            created_at: "2026-07-21T00:00:00Z",
+            updated_at: "2026-07-21T00:01:00Z",
+            html_url: "https://github.com/o/r/actions/runs/1",
+          },
+        ],
+      },
+    });
+
+    const client = new RealDashboardGitHubClient();
+    const run = await client.fetchLatestWorkflowRun("o/r", 42, "release/v1");
+
+    expect(calls[0]!.url).toBe(
+      "https://api.github.com/repos/o/r/actions/workflows/42/runs?branch=release%2Fv1&per_page=1",
+    );
+    expect(run).toMatchObject({ status: "completed", conclusion: "success" });
+  });
+
   test("ghRest returns undefined on a non-2xx response", async () => {
     stubFetch({ status: 404 });
     expect(await ghRest("/repos/o/r")).toBeUndefined();

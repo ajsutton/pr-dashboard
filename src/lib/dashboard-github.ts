@@ -155,7 +155,7 @@ export interface DashboardGitHubClient {
   listCircleConfigFiles(repo: string): Promise<CircleConfigFile[]>;
   fetchTextFile(repo: string, path: string): Promise<string | undefined>;
   fetchActionsWorkflows(repo: string): Promise<RawActionsWorkflow[]>;
-  fetchLatestWorkflowRun(repo: string, workflowId: number): Promise<RawActionsRun | undefined>;
+  fetchLatestWorkflowRun(repo: string, workflowId: number, branch: string): Promise<RawActionsRun | undefined>;
 }
 
 const GITHUB_API = "https://api.github.com";
@@ -1168,11 +1168,11 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
       .map((w) => ({ id: w.id as number, name: w.name ?? "", path: w.path ?? "", state: w.state ?? "active" }));
   }
 
-  async fetchLatestWorkflowRun(repo: string, workflowId: number): Promise<RawActionsRun | undefined> {
+  async fetchLatestWorkflowRun(repo: string, workflowId: number, branch: string): Promise<RawActionsRun | undefined> {
     const [owner, name] = repo.split("/");
     if (!owner || !name) return undefined;
     const data = (await ghRest(
-      `/repos/${owner}/${name}/actions/workflows/${workflowId}/runs?per_page=1`,
+      `/repos/${owner}/${name}/actions/workflows/${workflowId}/runs?branch=${encodeURIComponent(branch)}&per_page=1`,
     )) as { workflow_runs?: Array<Record<string, unknown>> } | undefined;
     const r = data?.workflow_runs?.[0];
     if (!r) return undefined;
