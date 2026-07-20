@@ -30,7 +30,7 @@ Open `http://127.0.0.1:3456`.
 | `GH_TOKEN` | (required) | GitHub PAT or `gh auth token` |
 | `CITOKEN` | (optional) | CircleCI personal API token — needed to read private CircleCI projects and to lift the per-IP rate limit |
 | `DASHBOARD_DEBUG` | (off) | set to `1` (or pass `--debug`) to trace every GitHub + CircleCI request/response — incl. partial GraphQL `errors` — to the logs. Use to diagnose an empty/blank board. Verbose. |
-| `DASHBOARD_PROJECT_WORKFLOWS` | `1` (on) | set to `0` to disable the expected/scheduled-workflow view in Projects. When on, pinned repos (`DASHBOARD_REPOS`) also show every workflow defined in their CircleCI config + GitHub Actions, annotated with when it last ran — so a scheduled job that has stopped firing or never fired is visible. |
+| `DASHBOARD_PROJECT_WORKFLOWS` | `1` (on) | set to `0` to disable the expected/scheduled-workflow view in Projects. When on, pinned repos (`DASHBOARD_REPOS`) show workflows defined in their CircleCI config plus GitHub Actions workflows that can run outside pull requests and merge queues. Statuses come only from the default branch, so a scheduled job that has stopped firing or never fired is visible. |
 | `DASHBOARD_PROJECT_WORKFLOWS_MS` | `300000` | how often (ms) to refresh the expected-workflow set. Separate, slower cadence than the live CI polling. |
 
 ## Docker

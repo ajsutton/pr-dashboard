@@ -380,6 +380,44 @@ describe("DashboardPoller refreshProjectWorkflows", () => {
     expect(weekly!.lastRun!.found).toBe(false);
   });
 
+  test("excludes PR-only workflows and requests status only for the default branch", async () => {
+    const latestRunCalls: Array<{ repo: string; workflowId: number; branch: string }> = [];
+    const github: DashboardGitHubClient = {
+      ...makeGitHubWithWorkflows(),
+      fetchActionsWorkflows: () =>
+        Promise.resolve([
+          { id: 1, name: "pr-title", path: ".github/workflows/pr-title.yml", state: "active" },
+          { id: 2, name: "CI", path: ".github/workflows/ci.yml", state: "active" },
+        ]),
+      fetchTextFile: (_repo, path) =>
+        Promise.resolve(path.endsWith("pr-title.yml") ? "on: pull_request\n" : "on: [pull_request, push]\n"),
+      fetchLatestWorkflowRun: (repo, workflowId, branch) => {
+        latestRunCalls.push({ repo, workflowId, branch });
+        return Promise.resolve({
+          status: "completed",
+          conclusion: "success",
+          updated_at: "2026-07-21T00:01:00Z",
+          html_url: "https://github.com/o/r/actions/runs/2",
+        });
+      },
+    };
+    const snapshots: DashboardSnapshot[] = [];
+    const poller = new DashboardPoller({
+      pinnedRepos: ["o/r"],
+      github,
+      circle: makeCircleWithInsights(),
+      onSnapshot: (snapshot) => snapshots.push(snapshot),
+    });
+
+    await poller.refreshGitHub();
+    await poller.refreshProjectWorkflows();
+
+    const jobs = snapshots.at(-1)!.defaultBranchJobs;
+    expect(jobs.some((job) => job.name === "pr-title")).toBe(false);
+    expect(jobs.find((job) => job.name === "CI")?.lastRun).toMatchObject({ found: true, status: "success" });
+    expect(latestRunCalls).toEqual([{ repo: "o/r", workflowId: 2, branch: "main" }]);
+  });
+
   test("caches config files per SHA so unchanged configs are not re-fetched each tick", async () => {
     // Call counters for config-fetch methods (should be called only once) vs
     // live-data methods (should be called once per tick).

@@ -38,6 +38,7 @@ import {
   scanCircleWorkflows,
   buildCircleProjectWorkflows,
   buildActionsProjectWorkflows,
+  isPullRequestOnlyActionsWorkflow,
   mergeProjectWorkflows,
   type ProjectWorkflow,
   type ActionsWorkflowInput,
@@ -123,13 +124,9 @@ export class DashboardPoller {
   /** Parsed CircleCI workflow set per repo, keyed by the repo's default-branch
    *  head SHA — reused across slow ticks while the committed config is unchanged. */
   private circleConfigCache = new Map<string, { sha: string; defined: DefinedWorkflow[] }>();
-  /** GitHub Actions workflow file bodies per repo (for on:schedule detection),
+  /** GitHub Actions workflow file bodies per repo (for trigger classification),
    *  keyed by head SHA. */
   private actionsFileCache = new Map<string, { sha: string; byPath: Map<string, string> }>();
-
-  private headShaFor(repo: string): string | undefined {
-    return this.defaultBranchSeed.find((d) => d.repo === repo)?.sha;
-  }
 
   constructor(opts: DashboardPollerOpts) {
     this.github = opts.github ?? new RealDashboardGitHubClient({ scopeRepos: opts.scopeRepos ?? [] });
@@ -197,7 +194,8 @@ export class DashboardPoller {
         const list: ProjectWorkflow[] = [];
         const [owner, name] = repo.split("/");
         if (!owner || !name) return;
-        const sha = this.headShaFor(repo);
+        const defaultBranch = this.defaultBranchSeed.find((item) => item.repo === repo);
+        const sha = defaultBranch?.sha;
         // CircleCI
         try {
           // Config rarely changes — reuse the parsed workflow set while the
@@ -232,29 +230,39 @@ export class DashboardPoller {
         // GitHub Actions
         try {
           const workflows = await this.github.fetchActionsWorkflows(repo);
-          // Workflow file bodies (used only for on:schedule detection) change
-          // rarely — cache them per head SHA so each tick only refetches the
-          // cheap workflow list + each workflow's latest run.
+          // Workflow file bodies drive schedule and PR-only classification.
+          // Cache them per head SHA so each tick only refetches the cheap
+          // workflow list and each eligible workflow's latest branch run.
           let fileCache = this.actionsFileCache.get(repo);
           if (!fileCache || fileCache.sha !== (sha ?? "")) {
             fileCache = { sha: sha ?? "", byPath: new Map() };
             if (sha) this.actionsFileCache.set(repo, fileCache);
           }
-          const inputs: ActionsWorkflowInput[] = await Promise.all(
-            workflows.map(async (w) => {
+          const definitions = await Promise.all(
+            workflows.map(async (workflow) => {
               let fileContent: string | undefined;
-              if (w.path) {
-                const cachedContent = fileCache!.byPath.get(w.path);
+              if (workflow.path) {
+                const cachedContent = fileCache!.byPath.get(workflow.path);
                 if (cachedContent !== undefined) {
                   fileContent = cachedContent;
                 } else {
-                  fileContent = await this.github.fetchTextFile(repo, w.path);
-                  if (sha && fileContent != null) fileCache!.byPath.set(w.path, fileContent);
+                  fileContent = await this.github.fetchTextFile(repo, workflow.path);
+                  if (sha && fileContent != null) fileCache!.byPath.set(workflow.path, fileContent);
                 }
               }
-              const latestRun = await this.github.fetchLatestWorkflowRun(repo, w.id);
-              return { workflow: w, fileContent, latestRun };
+              return { workflow, fileContent };
             }),
+          );
+          const inputs: ActionsWorkflowInput[] = await Promise.all(
+            definitions
+              .filter(({ fileContent }) => !isPullRequestOnlyActionsWorkflow(fileContent))
+              .map(async ({ workflow, fileContent }) => ({
+                workflow,
+                fileContent,
+                latestRun: defaultBranch
+                  ? await this.github.fetchLatestWorkflowRun(repo, workflow.id, defaultBranch.branch)
+                  : undefined,
+              })),
           );
           list.push(...buildActionsProjectWorkflows(repo, inputs));
         } catch (err) {
