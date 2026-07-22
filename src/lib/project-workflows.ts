@@ -173,6 +173,16 @@ const PULL_REQUEST_ONLY_EVENTS: Record<string, true> = {
   merge_group: true,
 };
 
+/**
+ * True for Actions events whose runs belong to pull requests or merge queues,
+ * rather than to the repository's default branch. GitHub's REST `branch`
+ * filter compares the bare head-branch name, so a fork PR whose branch is also
+ * named `develop` can otherwise leak into a `branch=develop` query.
+ */
+export function isPullRequestScopedActionsEvent(event: string | undefined): boolean {
+  return !!event && PULL_REQUEST_ONLY_EVENTS[event] === true;
+}
+
 function actionsWorkflowEvents(fileContent: string | undefined): Set<string> | undefined {
   if (!fileContent) return undefined;
   let doc: unknown;
@@ -193,7 +203,7 @@ function actionsWorkflowEvents(fileContent: string | undefined): Set<string> | u
 
 export function isPullRequestOnlyActionsWorkflow(fileContent: string | undefined): boolean {
   const events = actionsWorkflowEvents(fileContent);
-  return !!events?.size && [...events].every((event) => PULL_REQUEST_ONLY_EVENTS[event] === true);
+  return !!events?.size && [...events].every((event) => isPullRequestScopedActionsEvent(event));
 }
 
 function mapActionsStatus(status: string, conclusion: string | null | undefined): CiJobStatusValue {

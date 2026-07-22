@@ -47,9 +47,19 @@ Extend the per-workflow latest-run client method to require a branch and request
 
 `GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs?branch={default_branch}&per_page=1`
 
-The poller passes the default branch obtained from its existing default-branch seed. A workflow with no matching run receives `lastRun: { found: false }`, even if it has newer pull-request or merge-queue runs.
+GitHub compares `branch` to the bare head-branch name, not an owner-qualified
+ref. A fork PR whose head branch is also named `develop` can therefore appear
+in an upstream `branch=develop` response. Both the recent-run and long-lookback
+paths explicitly discard `pull_request`, `pull_request_target`, and
+`merge_group` events after applying the branch filter. The long-lookback path
+normally keeps the cheap one-run request, but if that result is PR-scoped it
+pages through older results to find the newest eligible run.
 
-The recent-run path already requests `/actions/runs?branch={default_branch}` and remains unchanged. After this change, both recent and long-lookback Projects statuses are scoped to the default branch.
+The poller passes the default branch obtained from its existing default-branch
+seed. A workflow with no eligible matching run receives
+`lastRun: { found: false }`, even if it has newer pull-request or merge-queue
+runs. Both recent and long-lookback Projects statuses are therefore scoped to
+the default branch and to non-PR events.
 
 ### Data flow
 
@@ -75,6 +85,8 @@ Unit tests will cover:
 - Default branch propagation into the latest-run request.
 - Branch query encoding.
 - A PR-only latest run no longer supplying Projects status when no default-branch run exists.
+- A fork PR whose head branch has the same bare name as the upstream default
+  branch being excluded from both recent and long-lookback status.
 
 ## Acceptance criteria
 

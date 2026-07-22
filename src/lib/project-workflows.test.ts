@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { scanCircleWorkflows, type CircleConfigFile, buildCircleProjectWorkflows, buildActionsProjectWorkflows, mergeProjectWorkflows, isCodeDefinedWorkflowPath, isPullRequestOnlyActionsWorkflow } from "./project-workflows.ts";
+import { scanCircleWorkflows, type CircleConfigFile, buildCircleProjectWorkflows, buildActionsProjectWorkflows, mergeProjectWorkflows, isCodeDefinedWorkflowPath, isPullRequestOnlyActionsWorkflow, isPullRequestScopedActionsEvent } from "./project-workflows.ts";
 import type { DefaultBranchJob } from "../types.ts";
 import type { ProjectWorkflow } from "./project-workflows.ts";
 
@@ -49,6 +49,21 @@ describe("isPullRequestOnlyActionsWorkflow", () => {
     expect(isPullRequestOnlyActionsWorkflow("on: [\n")).toBe(false);
     expect(isPullRequestOnlyActionsWorkflow("on: 123\n")).toBe(false);
     expect(isPullRequestOnlyActionsWorkflow("name: no-triggers\n")).toBe(false);
+  });
+});
+
+describe("isPullRequestScopedActionsEvent", () => {
+  test("identifies PR and merge-queue run events", () => {
+    expect(isPullRequestScopedActionsEvent("pull_request")).toBe(true);
+    expect(isPullRequestScopedActionsEvent("pull_request_target")).toBe(true);
+    expect(isPullRequestScopedActionsEvent("merge_group")).toBe(true);
+  });
+
+  test("keeps default-branch-capable and unknown events", () => {
+    expect(isPullRequestScopedActionsEvent("push")).toBe(false);
+    expect(isPullRequestScopedActionsEvent("schedule")).toBe(false);
+    expect(isPullRequestScopedActionsEvent("workflow_dispatch")).toBe(false);
+    expect(isPullRequestScopedActionsEvent(undefined)).toBe(false);
   });
 });
 

@@ -315,6 +315,7 @@ describe("ghRest / ghGraphql (direct GitHub REST/GraphQL over fetch)", () => {
       body: {
         workflow_runs: [
           {
+            event: "push",
             status: "completed",
             conclusion: "success",
             created_at: "2026-07-21T00:00:00Z",
@@ -332,6 +333,86 @@ describe("ghRest / ghGraphql (direct GitHub REST/GraphQL over fetch)", () => {
       "https://api.github.com/repos/o/r/actions/workflows/42/runs?branch=release%2Fv1&per_page=1",
     );
     expect(run).toMatchObject({ status: "completed", conclusion: "success" });
+  });
+
+  test("fetchLatestWorkflowRun skips a fork PR whose head branch matches the default branch", async () => {
+    stubFetchSequence([
+      {
+        body: {
+          workflow_runs: [
+            {
+              event: "pull_request",
+              head_branch: "develop",
+              head_repository: { full_name: "fork/optimism" },
+              status: "completed",
+              conclusion: "action_required",
+              html_url: "https://github.com/o/r/actions/runs/1",
+            },
+          ],
+        },
+      },
+      {
+        body: {
+          workflow_runs: [
+          {
+            event: "pull_request",
+            head_branch: "develop",
+            head_repository: { full_name: "fork/optimism" },
+            status: "completed",
+            conclusion: "action_required",
+            html_url: "https://github.com/o/r/actions/runs/1",
+          },
+          {
+            event: "push",
+            head_branch: "develop",
+            head_repository: { full_name: "o/r" },
+            status: "completed",
+            conclusion: "success",
+            html_url: "https://github.com/o/r/actions/runs/2",
+          },
+          ],
+        },
+      },
+    ]);
+
+    const client = new RealDashboardGitHubClient();
+    const run = await client.fetchLatestWorkflowRun("o/r", 42, "develop");
+
+    expect(run).toMatchObject({ conclusion: "success", html_url: "https://github.com/o/r/actions/runs/2" });
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.url).toEndWith("branch=develop&per_page=100&page=1");
+  });
+
+  test("fetchDefaultBranchRecentRuns excludes PR and merge-queue events returned for the branch name", async () => {
+    const baseRun = {
+      workflow_id: 42,
+      name: "CI",
+      path: ".github/workflows/ci.yml",
+      status: "completed",
+      conclusion: "success",
+      created_at: "2026-07-22T00:00:00Z",
+      run_started_at: "2026-07-22T00:00:00Z",
+      updated_at: "2026-07-22T00:01:00Z",
+      head_sha: "abc",
+      html_url: "https://github.com/o/r/actions/runs/1",
+      id: 1,
+    };
+    stubFetch({
+      body: {
+        workflow_runs: [
+          { ...baseRun, event: "pull_request", head_branch: "develop" },
+          { ...baseRun, event: "pull_request_target", id: 2 },
+          { ...baseRun, event: "merge_group", id: 3 },
+          { ...baseRun, event: "push", id: 4, html_url: "https://github.com/o/r/actions/runs/4" },
+        ],
+      },
+    });
+
+    const client = new RealDashboardGitHubClient();
+    const runs = await client.fetchDefaultBranchRecentRuns("o/r", "develop", 72);
+
+    expect(runs.map((run) => ({ event: run.event, runId: run.runId }))).toEqual([{ event: "push", runId: 4 }]);
+    expect(calls[0]!.url).toContain("branch=develop");
   });
 
   test("ghRest returns undefined on a non-2xx response", async () => {

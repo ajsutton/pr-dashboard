@@ -7,7 +7,7 @@
 import type { PrCard, MergeQueueEntry } from "../types.ts";
 import { debugLog, summarizeQuery, truncateBody } from "./debug.ts";
 import type { CircleConfigFile, RawActionsWorkflow, RawActionsRun } from "./project-workflows.ts";
-import { isCodeDefinedWorkflowPath } from "./project-workflows.ts";
+import { isCodeDefinedWorkflowPath, isPullRequestScopedActionsEvent } from "./project-workflows.ts";
 
 export interface RawCheckContext {
   __typename: "CheckRun" | "StatusContext" | string;
@@ -1171,18 +1171,38 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
   async fetchLatestWorkflowRun(repo: string, workflowId: number, branch: string): Promise<RawActionsRun | undefined> {
     const [owner, name] = repo.split("/");
     if (!owner || !name) return undefined;
-    const data = (await ghRest(
-      `/repos/${owner}/${name}/actions/workflows/${workflowId}/runs?branch=${encodeURIComponent(branch)}&per_page=1`,
-    )) as { workflow_runs?: Array<Record<string, unknown>> } | undefined;
-    const r = data?.workflow_runs?.[0];
-    if (!r) return undefined;
-    return {
+    const parseRun = (r: Record<string, unknown>): RawActionsRun => ({
       status: (r["status"] as string) ?? "",
       conclusion: (r["conclusion"] as string | null) ?? undefined,
       created_at: (r["created_at"] as string) ?? undefined,
       updated_at: (r["updated_at"] as string) ?? undefined,
       html_url: (r["html_url"] as string) ?? undefined,
-    };
+    });
+    const firstData = (await ghRest(
+      `/repos/${owner}/${name}/actions/workflows/${workflowId}/runs?branch=${encodeURIComponent(branch)}&per_page=1`,
+    )) as { workflow_runs?: Array<Record<string, unknown>> } | undefined;
+    const first = firstData?.workflow_runs?.[0];
+    if (!first) return undefined;
+    if (!isPullRequestScopedActionsEvent(first["event"] as string | undefined)) return parseRun(first);
+
+    // The cheap latest-only query found a colliding PR/merge run. Page through
+    // history only in this exceptional case to find the real latest branch run.
+    const PER_PAGE = 100;
+    const MAX_PAGES = 20;
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const data = (await ghRest(
+        `/repos/${owner}/${name}/actions/workflows/${workflowId}/runs?branch=${encodeURIComponent(branch)}&per_page=${PER_PAGE}&page=${page}`,
+      )) as { workflow_runs?: Array<Record<string, unknown>> } | undefined;
+      const runs = data?.workflow_runs ?? [];
+      for (const r of runs) {
+        // GitHub matches `branch` by bare head-branch name. A PR from
+        // fork:develop therefore appears in an upstream branch=develop query.
+        if (isPullRequestScopedActionsEvent(r["event"] as string | undefined)) continue;
+        return parseRun(r);
+      }
+      if (runs.length < PER_PAGE) break;
+    }
+    return undefined;
   }
 
   /**
@@ -1206,6 +1226,9 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
       const runs = (data?.["workflow_runs"] as Array<Record<string, unknown>>) ?? [];
       if (runs.length === 0) break;
       for (const r of runs) {
+        // Defend against GitHub's bare branch-name matching admitting fork PR
+        // and merge-queue runs into a default-branch query.
+        if (isPullRequestScopedActionsEvent(r["event"] as string | undefined)) continue;
         const workflowId = (r["workflow_id"] as number) ?? 0;
         if (!workflowId) continue;
         // Skip GitHub-managed dynamic workflows (Dependabot, CodeQL default
