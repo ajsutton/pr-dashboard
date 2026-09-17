@@ -3,6 +3,7 @@
  * and renders the latest dashboard-snapshot messages.
  */
 
+import { startDashboardConnection, STALE_AFTER_MS } from "./dashboard-connection.js";
 import { sortStacks, computeVisibleStacks } from "./dashboard-sort.js";
 import {
   diffPrLifecycles,
@@ -102,7 +103,7 @@ function applyConnState() {
 }
 function isStale() {
   if (!latest?.generatedAt) return false;
-  return Date.now() - Date.parse(latest.generatedAt) > 2 * 60 * 1000;
+  return Date.now() - Date.parse(latest.generatedAt) > STALE_AFTER_MS;
 }
 
 function fmtAge(ms) {
@@ -1030,9 +1031,23 @@ function runShipSail(repos) {
   }
 }
 
-function render() {
+let renderGeneration = 0;
+let activeTransition = null;
+
+function render({ reset = false } = {}) {
   const snap = effectiveSnapshot();
   if (!snap) return;
+  const generation = ++renderGeneration;
+  if (reset) {
+    activeTransition?.skipTransition();
+    prevPrState = prLifecycleState(snap);
+    prevQueueState = queueLifecycleState(snap);
+    prevQueueRepos = currentQueueRepos(snap);
+    for (const timer of lingerQueueTimers.values()) clearTimeout(timer);
+    lingerQueueTimers.clear();
+    lingerQueueRepos.clear();
+    clearLifecycleClasses();
+  }
   userEl.textContent = snap.user || "";
 
   const nextState = prLifecycleState(snap);
@@ -1051,6 +1066,7 @@ function render() {
 
   const hadContent = stacksEl.children.length > 0 || jobsEl.children.length > 0 || queuesEl.children.length > 0;
   const doRender = () => {
+    if (generation !== renderGeneration) return;
     renderStats(snap);
     renderQueues(snap, lingerQueueRepos);
     renderStacks(snap);
@@ -1075,16 +1091,17 @@ function render() {
   // root. The overlay has no view-transition-name and is captured into the
   // root snapshot, so the cards visibly pop above the overlay for the
   // duration of the transition.
-  const wantViewTransition = document.startViewTransition && hadContent && slurps.length === 0 && !openStatId;
+  const wantViewTransition = !reset && document.startViewTransition && hadContent && slurps.length === 0 && !openStatId;
   if (wantViewTransition) {
-    const t = document.startViewTransition(doRender);
-    t.ready.finally(() => {
+    const t = activeTransition = document.startViewTransition(doRender);
+    t.ready.then(() => {
+      if (generation !== renderGeneration) return;
       clearLifecycleClasses();
       runSlurps(slurps);
       runExplosions(explosions);
       setTimeout(() => runShipSail(mergedRepos), 520);
       setTimeout(clearQueueRowEntering, 900);
-    });
+    }).catch(() => {});
   } else {
     doRender();
     setTimeout(clearLifecycleClasses, 900);
@@ -1160,7 +1177,7 @@ function updateTimestamp() {
     return;
   }
   const age = Date.now() - Date.parse(latest.generatedAt);
-  if (age <= 2 * 60 * 1000) {
+  if (age <= STALE_AFTER_MS) {
     updatedEl.textContent = "";
   } else {
     updatedEl.textContent = `updated ${fmtAge(age)} ago`;
@@ -1177,44 +1194,16 @@ function escapeHtml(s) {
 }
 function escapeAttr(s) { return escapeHtml(s); }
 
-function connect() {
-  // Resolve "ws" against <base href> so the URL goes through whatever
-  // reverse-proxy prefix the page was served under.
-  const wsHref = new URL("ws", document.baseURI);
-  wsHref.protocol = wsHref.protocol === "https:" ? "wss:" : "ws:";
-  const ws = new WebSocket(wsHref.href);
-  setConn("connecting");
-  ws.addEventListener("open", () => setConn("open"));
-  ws.addEventListener("close", () => {
-    setConn("closed");
-    setTimeout(connect, 2000);
-  });
-  ws.addEventListener("error", () => setConn("closed"));
-  ws.addEventListener("message", (ev) => {
-    let msg;
-    try { msg = JSON.parse(ev.data); } catch { return; }
-    if (msg.type === "dashboard-snapshot") {
-      latest = msg.data;
-      render();
-    } else if (msg.type === "reload") {
-      location.reload();
-    }
-  });
-}
-
 if (isBrowser) {
-  // Bootstrap snapshot via REST in case we missed the initial WS push.
-  fetch("api/dashboard")
-    .then((r) => r.json())
-    .then((data) => {
-      if (data && data.prs) {
-        latest = data;
-        render();
-      }
-    })
-    .catch(() => {});
-
-  connect();
+  startDashboardConnection({
+    document, window, WebSocket, fetch,
+    onState: setConn,
+    onReload: () => location.reload(),
+    onSnapshot: (data, options) => {
+      latest = data;
+      render(options);
+    },
+  });
 
   updatedTicker = setInterval(updateTimestamp, 1000);
 
