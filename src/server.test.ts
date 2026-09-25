@@ -44,6 +44,15 @@ describe("dashboard server", () => {
     expect(snap).toHaveProperty("prs");
   });
 
+  it("exposes GitHub budget diagnostics without credentials", async () => {
+    const r = await fetch(`http://127.0.0.1:${port}/api/github-usage`);
+    expect(r.status).toBe(200);
+    const usage = await r.json();
+    expect(usage).toHaveProperty("budgets.core");
+    expect(usage).toHaveProperty("budgets.graphql");
+    expect(usage).toHaveProperty("operations");
+  });
+
   it("serves the kermit image as a PNG", async () => {
     const r = await fetch(`http://127.0.0.1:${port}/kermit.png`);
     expect(r.status).toBe(200);

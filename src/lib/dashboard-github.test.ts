@@ -1,3 +1,4 @@
+import { resetGitHubTransport } from "./github-transport.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   applyRulesetReviewRequirements,
@@ -266,6 +267,7 @@ describe("ghRest / ghGraphql (direct GitHub REST/GraphQL over fetch)", () => {
   beforeEach(() => {
     calls = [];
     process.env.GH_TOKEN = "tok-123";
+    resetGitHubTransport();
   });
 
   afterEach(() => {
@@ -390,7 +392,7 @@ describe("ghRest / ghGraphql (direct GitHub REST/GraphQL over fetch)", () => {
       path: ".github/workflows/ci.yml",
       status: "completed",
       conclusion: "success",
-      created_at: "2026-07-22T00:00:00Z",
+      created_at: new Date().toISOString(),
       run_started_at: "2026-07-22T00:00:00Z",
       updated_at: "2026-07-22T00:01:00Z",
       head_sha: "abc",
@@ -426,13 +428,13 @@ describe("ghRest / ghGraphql (direct GitHub REST/GraphQL over fetch)", () => {
     expect(calls[0]!.url).toBe("https://api.github.com/graphql");
     expect(calls[0]!.init!.method).toBe("POST");
     const body = JSON.parse(String(calls[0]!.init!.body));
-    expect(body).toEqual({ query: "query($a: String!) { x }", variables: { a: "v" } });
+    expect(body).toEqual({ query: "query($a: String!) { rateLimit { cost }  x }", variables: { a: "v" } });
     expect(data).toEqual({ viewer: { login: "me" } });
   });
 
-  test("ghGraphql returns undefined on a non-2xx response", async () => {
+  test("ghGraphql throws on a non-2xx response", async () => {
     stubFetch({ status: 500 });
-    expect(await ghGraphql("query { x }")).toBeUndefined();
+    await expect(ghGraphql("query { x }")).rejects.toThrow("HTTP 500");
   });
 
   test("omits the Authorization header when no token is set", async () => {
@@ -443,23 +445,16 @@ describe("ghRest / ghGraphql (direct GitHub REST/GraphQL over fetch)", () => {
     expect(headers["Authorization"]).toBeUndefined();
   });
 
-  test("retries after a rate-limit response, then returns the eventual success", async () => {
+  test("pauses subsequent requests after a rate limit instead of retrying immediately", async () => {
     stubFetchSequence([
       { status: 429, headers: { "retry-after": "0" } },
       { status: 200, body: { workflow_runs: [] } },
     ]);
-    const data = await ghRest("/repos/o/r/actions/runs");
-    expect(calls).toHaveLength(2);
-    expect(data).toEqual({ workflow_runs: [] });
+    await expect(ghRest("/repos/o/r/actions/runs")).rejects.toThrow("rate limited");
+    await expect(ghRest("/repos/o/r/actions/runs")).rejects.toThrow("paused until");
+    expect(calls).toHaveLength(1);
   });
 
-  test("gives up (returns undefined) after exhausting retries on persistent rate limiting", async () => {
-    stubFetch({ status: 403, headers: { "retry-after": "0", "x-ratelimit-remaining": "0" } });
-    const data = await ghRest("/repos/o/r");
-    expect(data).toBeUndefined();
-    // initial attempt + MAX_RETRIES (3) follow-ups
-    expect(calls).toHaveLength(4);
-  });
 });
 
 describe("RealDashboardGitHubClient.fetchViewerWorkload (failure handling)", () => {
@@ -468,6 +463,7 @@ describe("RealDashboardGitHubClient.fetchViewerWorkload (failure handling)", () 
 
   beforeEach(() => {
     process.env.GH_TOKEN = "tok-123";
+    resetGitHubTransport();
   });
   afterEach(() => {
     globalThis.fetch = realFetch;
@@ -532,6 +528,7 @@ describe("fetchViewerWorkload (adaptive combined→split + repo scoping)", () =>
 
   beforeEach(() => {
     process.env.GH_TOKEN = "tok-123";
+    resetGitHubTransport();
     queries = [];
   });
   afterEach(() => {
@@ -583,6 +580,7 @@ describe("fetchViewerWorkload (adaptive combined→split + repo scoping)", () =>
 
   test("falls back to split requests when the combined query times out, and stays split", async () => {
     stubByQuery((q) => {
+      if (q.includes("rulesets(first:")) return { body: { data: { repository: { rulesets: { nodes: [] } } } } };
       const hasSearch = q.includes("assignedIssues");
       const hasPr = q.includes("pullRequests") || q.includes("prs: search");
       if (hasSearch && hasPr) return { emptyBody: true }; // combined → server-side timeout
@@ -612,7 +610,9 @@ describe("fetchViewerWorkload (adaptive combined→split + repo scoping)", () =>
     const inScope = { ...samplePrNode, number: 1, repository: { ...samplePrNode.repository, nameWithOwner: "org/a" } };
     const outScope = { ...samplePrNode, number: 2, repository: { ...samplePrNode.repository, nameWithOwner: "org/other" } };
     const issue = (n: number, repo: string) => ({ number: n, title: "i", url: "", createdAt: "", updatedAt: "", repository: { nameWithOwner: repo } });
-    stubByQuery(() => ({
+    stubByQuery((q) => q.includes("rulesets(first:")
+      ? { body: { data: { repository: { rulesets: { nodes: [] } } } } }
+      : ({
       body: {
         data: {
           viewer: { pullRequests: { nodes: [inScope, outScope] } },
@@ -633,10 +633,10 @@ describe("fetchViewerWorkload (adaptive combined→split + repo scoping)", () =>
     // The query itself is unscoped (works for fine-grained PATs); no repo: qualifier.
     expect(queries[0]).not.toContain("repo:org/a");
     expect(queries[0]).toContain("pullRequests(first: 50");
-    expect(queries[0]).toContain("rulesets(first: 100");
-    expect(queries[0]).toContain("rules(first: 1, type: PULL_REQUEST)");
-    // Rulesets are bundled into the PR GraphQL selection; no body-less REST
-    // request is made after the workload query.
+    expect(queries[0]).not.toContain("rulesets(");
+    expect(queries[1]).toContain("rulesets(first: 100");
+    expect(queries[1]).toContain("rules(first: 1, type: PULL_REQUEST)");
+    // Rulesets are fetched once per in-scope repository, outside the PR tree.
     expect(queries.every(Boolean)).toBe(true);
   });
 });
@@ -664,18 +664,18 @@ describe("rateLimitDelayMs", () => {
     expect(delay).toBe(5000);
   });
 
-  test("falls back to a brief pause when rate-limited with no timing hint", () => {
-    expect(rateLimitDelayMs({ status: 429, headers: new Headers() }, 0)).toBe(1000);
+  test("waits at least a minute when rate-limited with no timing hint", () => {
+    expect(rateLimitDelayMs({ status: 429, headers: new Headers() }, 0)).toBe(60000);
   });
 
-  test("gives up (null) when the required wait exceeds the cap — don't stall the poll cycle", () => {
+  test("returns the full reset delay without a 30-second cap", () => {
     const now = 1_000_000_000_000;
     expect(
       rateLimitDelayMs(
         { status: 403, headers: new Headers({ "x-ratelimit-remaining": "0", "x-ratelimit-reset": reset(3600, now) }) },
         now,
       ),
-    ).toBeNull();
+    ).toBe(3600000);
   });
 
   test("clamps a past reset to 0 rather than returning a negative delay", () => {

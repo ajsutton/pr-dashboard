@@ -516,4 +516,39 @@ describe("DashboardPoller refreshProjectWorkflows", () => {
     expect(getInsightsWorkflowNamesCount).toBe(2); // live data — fetched every tick
     expect(fetchActionsWorkflowsCount).toBe(2);    // live data — fetched every tick
   });
+
+  test("keeps project cards on discovery failure and exposes the error", async () => {
+    const github = makeGitHubWithWorkflows();
+    const poller = new DashboardPoller({ pinnedRepos: ["o/r"], github, circle: makeCircleWithInsights(), onSnapshot: () => {} });
+    await poller.refreshGitHub();
+    await poller.refreshProjectWorkflows();
+    const before = poller.getSnapshot().defaultBranchJobs;
+    expect(before.length).toBeGreaterThan(0);
+    github.fetchActionsWorkflows = async () => { throw new Error("rate limited"); };
+    await poller.refreshProjectWorkflows();
+    expect(poller.getSnapshot().defaultBranchJobs).toEqual(before);
+    expect(poller.getSnapshot().errors?.some(e => e.includes("rate limited"))).toBe(true);
+  });
+
+  test("keeps Actions history on failure and uses the shared in-flight refresh", async () => {
+    const github = makeGitHubWithWorkflows();
+    let requests = 0;
+    const original = github.fetchViewerWorkload;
+    github.fetchViewerWorkload = () => { requests++; return original(); };
+    github.fetchDefaultBranchRecentRuns = async () => [{
+      workflowId: 1, workflowName: "CI", event: "push", status: "completed", conclusion: "success",
+      createdAt: new Date().toISOString(), startedAt: undefined, updatedAt: new Date().toISOString(),
+      headSha: "abc", url: "https://github.com/o/r/actions/runs/1", runId: 1,
+    }];
+    const poller = new DashboardPoller({ pinnedRepos: ["o/r"], github, circle: makeCircleWithInsights(), onSnapshot: () => {} });
+    await Promise.all([poller.refreshGitHub(), poller.refreshGitHub()]);
+    expect(requests).toBe(1);
+    const before = poller.getSnapshot().defaultBranchJobs;
+    expect(before.length).toBeGreaterThan(0);
+    github.fetchDefaultBranchRecentRuns = async () => { throw new Error("paused until reset"); };
+    await poller.refreshGitHub();
+    expect(poller.getSnapshot().defaultBranchJobs).toEqual(before);
+    expect(poller.getSnapshot().errors?.some(e => e.includes("paused until reset"))).toBe(true);
+  });
+
 });

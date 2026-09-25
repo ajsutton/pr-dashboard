@@ -5,7 +5,7 @@
  */
 
 import type { PrCard, MergeQueueEntry } from "../types.ts";
-import { debugLog, summarizeQuery, truncateBody } from "./debug.ts";
+import { debugLog } from "./debug.ts";
 import type { CircleConfigFile, RawActionsWorkflow, RawActionsRun } from "./project-workflows.ts";
 import { isCodeDefinedWorkflowPath, isPullRequestScopedActionsEvent } from "./project-workflows.ts";
 
@@ -39,6 +39,7 @@ export interface RawPr {
   baseRefName: string;
   headRefName: string;
   headRefOid: string;
+  baseRefOid?: string;
   author: string;
   createdAt: string;
   updatedAt: string;
@@ -127,12 +128,17 @@ export interface RawReviewRequestItem extends RawStatItem {
   reviewerLogins: string[];
 }
 
+export interface RepositoryActivity {
+  errors?: string[];
+  queues: { repo: string; entries: RawMergeQueueEntry[] }[];
+  heads: { repo: string; branch: string; sha: string; checks: RawCheckContext[] }[];
+}
+
 export interface DashboardGitHubClient {
   fetchViewer(): Promise<{ login: string }>;
   /**
-   * One GraphQL request that returns PRs the viewer authored plus the two
-   * search-based workload feeds (assigned issues + review-requested PRs).
-   * Folding all three into a single round-trip keeps refresh latency tight.
+   * Live authored PRs/checks plus cached workload searches and review rules.
+   * Repository rules and changed files are fetched outside the PR query.
    */
   fetchViewerWorkload(): Promise<ViewerWorkload>;
   /**
@@ -143,6 +149,7 @@ export interface DashboardGitHubClient {
    * no access) map back to `{ canonical: input, openIssues: 0, openPrs: 0 }`.
    */
   resolveRepoMeta(repos: string[]): Promise<Map<string, RepoMeta>>;
+  fetchRepositoryActivity?(repos: string[], branchRepos: string[]): Promise<RepositoryActivity>;
   fetchMergeQueue(repo: string): Promise<RawMergeQueueEntry[]>;
   fetchDefaultBranchHead(repo: string): Promise<{ branch: string; sha: string; checks: RawCheckContext[] } | undefined>;
   /**
@@ -152,141 +159,14 @@ export interface DashboardGitHubClient {
    * workflow so cards can show progress + last-result colour.
    */
   fetchDefaultBranchRecentRuns(repo: string, branch: string, windowHours: number): Promise<RawWorkflowRun[]>;
-  listCircleConfigFiles(repo: string): Promise<CircleConfigFile[]>;
-  fetchTextFile(repo: string, path: string): Promise<string | undefined>;
-  fetchActionsWorkflows(repo: string): Promise<RawActionsWorkflow[]>;
+  listCircleConfigFiles(repo: string, ref?: string): Promise<CircleConfigFile[]>;
+  fetchTextFile(repo: string, path: string, ref?: string): Promise<string | undefined>;
+  fetchActionsWorkflows(repo: string, ref?: string): Promise<RawActionsWorkflow[]>;
   fetchLatestWorkflowRun(repo: string, workflowId: number, branch: string): Promise<RawActionsRun | undefined>;
 }
 
-const GITHUB_API = "https://api.github.com";
-
-/**
- * Headers for every GitHub call. Auth comes from `$GH_TOKEN` (the same env var
- * the `gh` CLI reads), so the host setup is unchanged — only the transport
- * moved from spawning `gh` to native `fetch`, which lets the Docker image drop
- * the gh CLI entirely. Only github.com is supported (no GHE).
- */
-function ghHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {
-    "Accept": "application/vnd.github+json",
-    "User-Agent": "pr-dashboard",
-    "X-GitHub-Api-Version": "2022-11-28",
-  };
-  const token = process.env.GH_TOKEN;
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  return headers;
-}
-
-/** Follow-up attempts after the first request when GitHub rate-limits us. */
-const MAX_RETRIES = 3;
-/**
- * Never block a single request longer than this waiting out a rate limit. The
- * poller refreshes GitHub every 60s, so if the reset is further off than this
- * it's cheaper to give up and let the next cycle retry than to stall the whole
- * refresh behind one request.
- */
-const MAX_RATE_LIMIT_WAIT_MS = 30_000;
-
-/**
- * If `res` indicates a GitHub rate limit (primary or secondary), return how
- * long to wait before retrying in ms; otherwise null. Also returns null when
- * the wait would exceed MAX_RATE_LIMIT_WAIT_MS — caller should give up rather
- * than stall. Exported for unit tests.
- *
- * Signals, in priority order:
- *  - `Retry-After: <seconds>` — sent for secondary (abuse) limits.
- *  - `X-RateLimit-Reset: <epoch seconds>` when `X-RateLimit-Remaining: 0` —
- *    primary limit exhausted; wait until the window resets.
- *  - 429/403 with neither hint — brief fixed pause.
- */
-export function rateLimitDelayMs(res: { status: number; headers: Headers }, now: number): number | null {
-  const retryAfter = res.headers.get("retry-after");
-  const remaining = res.headers.get("x-ratelimit-remaining");
-  const reset = res.headers.get("x-ratelimit-reset");
-  const limited = res.status === 429 || (res.status === 403 && (remaining === "0" || retryAfter !== null));
-  if (!limited) return null;
-
-  let waitMs: number;
-  if (retryAfter !== null && /^\d+$/.test(retryAfter.trim())) {
-    waitMs = parseInt(retryAfter, 10) * 1000;
-  } else if (reset !== null && /^\d+$/.test(reset.trim())) {
-    waitMs = parseInt(reset, 10) * 1000 - now;
-  } else {
-    waitMs = 1000;
-  }
-  waitMs = Math.max(0, waitMs);
-  return waitMs > MAX_RATE_LIMIT_WAIT_MS ? null : waitMs;
-}
-
-/**
- * fetch() wrapper that transparently waits out and retries GitHub rate limits.
- * Returns the final Response (success or otherwise) so callers handle non-2xx
- * uniformly, or undefined if the request itself threw.
- */
-async function githubFetch(url: string, init?: RequestInit): Promise<Response | undefined> {
-  for (let attempt = 0; ; attempt++) {
-    let res: Response;
-    try {
-      res = await fetch(url, init);
-    } catch {
-      return undefined;
-    }
-    if (res.ok || attempt >= MAX_RETRIES) return res;
-    const delay = rateLimitDelayMs(res, Date.now());
-    if (delay === null) return res;
-    await Bun.sleep(delay);
-  }
-}
-
-/** Exported for unit tests. */
-export async function ghRest(path: string): Promise<unknown> {
-  const started = Date.now();
-  debugLog("github", `REST request GET ${path}`);
-  const res = await githubFetch(`${GITHUB_API}${path}`, { headers: ghHeaders() });
-  if (!res) {
-    debugLog("github", `REST GET ${path} → no response (network error)`);
-    return undefined;
-  }
-  const text = await res.text().catch(() => "");
-  debugLog("github", `REST GET ${path} → HTTP ${res.status} in ${Date.now() - started}ms: ${truncateBody(text)}`);
-  if (!res.ok) return undefined;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-}
-
-/** Exported for unit tests. */
-export async function ghGraphql(query: string, vars: Record<string, unknown> = {}): Promise<Record<string, unknown> | undefined> {
-  const started = Date.now();
-  debugLog("github", `GraphQL request ${summarizeQuery(query)} vars=${JSON.stringify(vars)}`);
-  const res = await githubFetch(`${GITHUB_API}/graphql`, {
-    method: "POST",
-    headers: { ...ghHeaders(), "Content-Type": "application/json" },
-    body: JSON.stringify({ query, variables: vars }),
-  });
-  if (!res) {
-    debugLog("github", "GraphQL request → no response (network error)");
-    return undefined;
-  }
-  const text = await res.text().catch(() => "");
-  debugLog("github", `GraphQL response HTTP ${res.status} in ${Date.now() - started}ms: ${truncateBody(text)}`);
-  if (!res.ok) return undefined;
-  try {
-    const parsed = JSON.parse(text) as { data?: Record<string, unknown>; errors?: unknown };
-    // GitHub answers partial failures with HTTP 200 + a populated `errors`
-    // array (cost limit, field-level timeout, missing scope). The data we'd
-    // otherwise return has null holes, so surface the errors under debug —
-    // this is the usual cause of a "0 PRs / blank board" run.
-    if (parsed.errors && (Array.isArray(parsed.errors) ? parsed.errors.length > 0 : true)) {
-      debugLog("github", `GraphQL errors: ${JSON.stringify(parsed.errors)}`);
-    }
-    return parsed.data;
-  } catch {
-    return undefined;
-  }
-}
+import { ghRest, ghGraphql } from "./github-transport.ts";
+export { ghRest, ghGraphql, rateLimitDelayMs } from "./github-transport.ts";
 
 const CONTEXTS_PAGE_SIZE = 100;
 
@@ -305,26 +185,18 @@ const CONTEXT_NODE_FIELDS = `
 `;
 
 /**
- * Every PR-node field the dashboard needs except the check rollup. Shared by
- * the combined and split workload queries, and by both the `viewer` and the
- * repo-scoped `search` PR sources, so the parser (`normalizePr`) sees the same
- * shape regardless of how the PRs were fetched.
+ * Repository rules are fetched independently of PRs and cached for 30m.
+ * Nesting this connection under each PR multiplies GraphQL query cost.
  */
-const PR_CORE_FIELDS = `
-  repository {
-    nameWithOwner
-    isArchived
-    defaultBranchRef { name }
-    rulesets(first: 100, includeParents: true, targets: [BRANCH]) {
+const RULESET_FIELDS = `    rulesets(first: 100, after: $after, includeParents: true, targets: [BRANCH]) {
+      pageInfo { hasNextPage endCursor }
       nodes {
         target
         enforcement
         conditions {
           ref_name: refName { include exclude }
         }
-        # A ruleset can contain at most one rule of a given type. Keeping this
-        # at 1 is also essential for GitHub's static node-limit calculation:
-        # 50 PRs × 100 rulesets × 100 rules exceeded the 500k query ceiling.
+        # A ruleset can contain at most one rule of a given type.
         rules(first: 1, type: PULL_REQUEST) {
           nodes {
             type
@@ -340,7 +212,13 @@ const PR_CORE_FIELDS = `
           }
         }
       }
-    }
+    }`;
+
+const PR_CORE_FIELDS = `
+  repository {
+    nameWithOwner
+    isArchived
+    defaultBranchRef { name }
   }
   number
   title
@@ -355,16 +233,13 @@ const PR_CORE_FIELDS = `
   baseRefName
   headRefName
   headRefOid
+  baseRefOid
   author { login }
   createdAt
   updatedAt
   reviews(last: 50) { nodes { author { login } state submittedAt } }
   reviewRequests(first: 20) {
     nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } }
-  }
-  files(first: 100) {
-    pageInfo { hasNextPage endCursor }
-    nodes { path }
   }
   baseRef {
     associatedPullRequests(first: 20, states: [OPEN, MERGED], orderBy: {field: UPDATED_AT, direction: DESC}) {
@@ -526,7 +401,8 @@ async function fetchRemainingCommitContexts(
   const out: RawCheckContext[] = [];
   let after: string | undefined = startCursor;
   while (after) {
-    const data = await ghGraphql(query, { owner, name, oid, after });
+    const data = await ghGraphql(query, { owner, name, oid, after }, "graphql.check-pages");
+    if (!data) throw new Error("Missing check contexts");
     const repoNode = data?.["repository"] as Record<string, unknown> | undefined;
     const commit = repoNode?.["object"] as Record<string, unknown> | undefined;
     const rollup = commit?.["statusCheckRollup"] as Record<string, unknown> | undefined;
@@ -567,7 +443,8 @@ async function fetchContextsForCommits(
       }
     }`,
   );
-  const data = await ghGraphql(`query { ${fields.join(" ")} }`);
+  const data = await ghGraphql(`query { ${fields.join(" ")} }`, {}, "graphql.checks");
+  if (!data) throw new Error("Missing check contexts");
   const followups: Array<{ owner: string; name: string; oid: string; cursor: string; into: RawCheckContext[] }> = [];
   commits.forEach((c, i) => {
     const repoNode = data?.[`c${i}`] as Record<string, unknown> | undefined;
@@ -704,6 +581,50 @@ function parseContexts(nodes: unknown): RawCheckContext[] {
   });
 }
 
+const MERGE_QUEUE_FIELDS = `
+          mergeQueue {
+            entries(first: 50) {
+              nodes {
+                position
+                enqueuedAt
+                state
+                pullRequest {
+                  number
+                  title
+                  url
+                  isDraft
+                  author { login }
+                  headRefOid
+                }
+                headCommit {
+                  oid
+                  statusCheckRollup {
+                    contexts(first: ${CONTEXTS_PAGE_SIZE}) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes { ${CONTEXT_NODE_FIELDS} }
+                    }
+                  }
+                }
+              }
+            }
+          }`;
+
+const DEFAULT_BRANCH_FIELDS = `
+          defaultBranchRef {
+            name
+            target {
+              ... on Commit {
+                oid
+                statusCheckRollup {
+                  contexts(first: ${CONTEXTS_PAGE_SIZE}) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes { ${CONTEXT_NODE_FIELDS} }
+                  }
+                }
+              }
+            }
+          }`;
+
 export class RealDashboardGitHubClient implements DashboardGitHubClient {
   /**
    * When non-empty, the workload feeds are filtered to these repos after
@@ -720,19 +641,107 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
    * retrying the combined query in case the workload has since shrunk.
    */
   private splitWorkload = false;
+  private searchCache?: { at: number; data: Record<string, unknown> };
+  private rulesCache = new Map<string, { at: number; rules: RawRuleset[] }>();
+  private filesCache = new Map<string, { identity: string; paths: string[] }>();
+  private metaCache = new Map<string, { at: number; value: RepoMeta }>();
+  private definitionCache = new Map<string, { at: number; value: RawActionsWorkflow[] }>();
+  private immutableCache = new Map<string, Promise<unknown>>();
+  private headCache = new Map<string, { at: number; value: { branch: string; sha: string; checks: RawCheckContext[] } }>();
+  private activityCache = new Map<string, { queue: { repo: string; entries: RawMergeQueueEntry[] }; head?: { repo: string; branch: string; sha: string; checks: RawCheckContext[] } }>();
+  private runsCache = new Map<string, { reconciledAt: number; refreshedAt: number; newestCreatedAt: number; runs: Map<number, RawWorkflowRun> }>();
+
+  private async immutable(path: string): Promise<unknown> {
+    let value = this.immutableCache.get(path);
+    if (!value) {
+      value = ghRest(path);
+      this.immutableCache.set(path, value);
+      if (this.immutableCache.size > 1000) this.immutableCache.delete(this.immutableCache.keys().next().value!);
+      void value.then(result => { if (result === undefined) this.immutableCache.delete(path); }, () => this.immutableCache.delete(path));
+    }
+    return value;
+  }
+
+  private async definitionHead(repo: string) {
+    const cached = this.headCache.get(repo);
+    if (cached && Date.now() - cached.at < 60_000) return cached.value;
+    return this.fetchDefaultBranchHead(repo);
+  }
+
+  private async enrichReviewRules(prs: RawPr[]): Promise<void> {
+    const now = Date.now();
+    const repos = [...new Set(prs.map(p => p.repo))];
+    for (const repo of repos) {
+      let cached = this.rulesCache.get(repo);
+      if (!cached || now - cached.at >= 30 * 60_000) {
+        const [owner, name] = repo.split("/");
+        const rules: RawRuleset[] = [];
+        let after: string | null = null;
+        do {
+          const data = await ghGraphql(`query($owner: String!, $name: String!, $after: String) {
+            repository(owner: $owner, name: $name) { ${RULESET_FIELDS} }
+          }`, { owner, name, after }, "graphql.rulesets");
+          const node = data?.repository as { rulesets?: { nodes?: RawRuleset[]; pageInfo?: { hasNextPage: boolean; endCursor: string } } } | undefined;
+          if (!node?.rulesets?.nodes) throw new Error(`Missing rulesets for ${repo}`);
+          rules.push(...node.rulesets.nodes);
+          after = node.rulesets.pageInfo?.hasNextPage ? node.rulesets.pageInfo.endCursor : null;
+        } while (after);
+        cached = { at: now, rules };
+        this.rulesCache.set(repo, cached);
+      }
+      for (const pr of prs.filter(p => p.repo === repo)) pr.rulesets = cached.rules;
+    }
+    for (const pr of prs) {
+      // Only file-scoped review rules need changed paths.
+      const needsFiles = pr.rulesets.some(r => r.rules?.nodes?.some(rule =>
+        rule.parameters?.required_reviewers?.some(reviewer => reviewer.file_patterns?.length)));
+      if (!needsFiles) continue;
+      const key = `${pr.repo}#${pr.number}`;
+      const identity = `${pr.headRefOid}:${pr.baseRefOid ?? ""}:${pr.baseRefName}`;
+      let cached = this.filesCache.get(key);
+      if (!cached || cached.identity !== identity) {
+        const [owner, name] = pr.repo.split("/");
+        const paths: string[] = [];
+        let cursor: string | null = null;
+        do {
+          const data = await ghGraphql(`query($owner: String!, $name: String!, $number: Int!, $after: String) {
+            repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+              files(first: 100, after: $after) { nodes { path } pageInfo { hasNextPage endCursor } }
+            } }
+          }`, { owner, name, number: pr.number, after: cursor }, "graphql.changed-files");
+          const files = (data?.repository as any)?.pullRequest?.files;
+          if (!files?.nodes) throw new Error(`Missing changed files for ${key}`);
+          paths.push(...files.nodes.map((n: { path: string }) => n.path));
+          cursor = files.pageInfo?.hasNextPage ? files.pageInfo.endCursor : null;
+        } while (cursor);
+        cached = { identity, paths };
+        this.filesCache.set(key, cached);
+      }
+      pr.changedFiles = cached.paths;
+    }
+    const active = new Set(prs.map(pr => `${pr.repo}#${pr.number}`));
+    for (const key of this.filesCache.keys()) if (!active.has(key)) this.filesCache.delete(key);
+    applyRulesetReviewRequirements(prs);
+  }
 
   constructor(opts: { scopeRepos?: string[] } = {}) {
     this.scopeRepos = opts.scopeRepos ?? [];
   }
 
   async fetchViewer(): Promise<{ login: string }> {
-    const data = await ghGraphql(`query { viewer { login } }`);
+    const data = await ghGraphql(`query { viewer { login } }`, {}, "graphql.viewer");
     const login = ((data?.["viewer"] as Record<string, unknown> | undefined)?.["login"] as string) ?? "";
     return { login };
   }
 
   async resolveRepoMeta(repos: string[]): Promise<Map<string, RepoMeta>> {
     const out = new Map<string, RepoMeta>();
+    repos = [...new Set(repos)];
+    for (const repo of repos) {
+      const cached = this.metaCache.get(repo);
+      if (cached && Date.now() - cached.at < 5 * 60_000) out.set(repo, cached.value);
+    }
+    repos = repos.filter(repo => !out.has(repo));
     if (repos.length === 0) return out;
     // Batch into a single GraphQL request using aliased `repository(...)`
     // selections. Cheaper than N round-trips through `gh api`. Each selection
@@ -764,15 +773,20 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
     }
     if (fields.length === 0) return out;
     const query = `query { ${fields.join(" ")} }`;
-    const data = await ghGraphql(query);
+    const data = await ghGraphql(query, {}, "graphql.repo-meta");
+    if (!data) throw new Error("Missing repository metadata");
     for (const { alias, repo } of inputs) {
-      out.set(repo, parseRepoMetaNode(data?.[alias], repo));
+      const value = parseRepoMetaNode(data[alias], repo);
+      out.set(repo, value);
+      this.metaCache.set(repo, { at: Date.now(), value });
     }
     return out;
   }
 
   async fetchViewerWorkload(): Promise<ViewerWorkload> {
-    return this.scopeWorkload(await this.fetchWorkloadRaw());
+    const workload = this.scopeWorkload(await this.fetchWorkloadRaw());
+    await this.enrichReviewRules(workload.prs);
+    return workload;
   }
 
   private async fetchWorkloadRaw(): Promise<ViewerWorkload> {
@@ -871,7 +885,8 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
    * missing, so the caller can fall back to the split requests.
    */
   private async fetchWorkloadCombined(): Promise<ViewerWorkload | undefined> {
-    const data = await ghGraphql(`query { ${this.prListBlock(true)} ${this.searchesBlock()} }`);
+    const refreshSearches = !this.searchCache || Date.now() - this.searchCache.at >= 5 * 60_000;
+    const data = await ghGraphql(`query { ${this.prListBlock(true)} ${refreshSearches ? this.searchesBlock() : ""} }`, {}, "graphql.workload");
     const nodes = this.extractPrNodes(data);
     if (!nodes) return undefined;
 
@@ -891,8 +906,8 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
         f.raw.checks.push(...more);
       }),
     );
-    applyRulesetReviewRequirements(raws);
-    return this.assembleWorkload(raws, data!);
+    if (refreshSearches) this.cacheSearches(data!);
+    return this.assembleWorkload(raws, this.searchCache!.data);
   }
 
   /**
@@ -903,8 +918,10 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
    */
   private async fetchWorkloadSplit(): Promise<ViewerWorkload> {
     const [prData, searchData] = await Promise.all([
-      ghGraphql(`query { ${this.prListBlock(false)} }`),
-      ghGraphql(`query { ${this.searchesBlock()} }`),
+      ghGraphql(`query { ${this.prListBlock(false)} }`, {}, "graphql.prs"),
+      this.searchCache && Date.now() - this.searchCache.at < 5 * 60_000
+        ? Promise.resolve(this.searchCache.data)
+        : ghGraphql(`query { ${this.searchesBlock()} }`, {}, "graphql.searches"),
     ]);
     const nodes = this.extractPrNodes(prData);
     if (!nodes) {
@@ -917,8 +934,15 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
       raws.push(normalizePr(n));
     }
     await this.attachChecks(raws);
-    applyRulesetReviewRequirements(raws);
-    return this.assembleWorkload(raws, searchData ?? {});
+    if (searchData !== this.searchCache?.data) this.cacheSearches(searchData);
+    return this.assembleWorkload(raws, this.searchCache!.data);
+  }
+
+  private cacheSearches(data: Record<string, unknown> | undefined): void {
+    if (!data?.assignedIssues || !data.reviewRequestedPrs || !data.personalReviewRequests) {
+      throw new Error("Missing workload searches");
+    }
+    this.searchCache = { at: Date.now(), data };
   }
 
   /** Fetch + attach check rollups for each PR's head commit (split mode). */
@@ -988,42 +1012,50 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
     };
   }
 
-  async fetchMergeQueue(repo: string): Promise<RawMergeQueueEntry[]> {
-    const [owner, name] = repo.split("/");
-    if (!owner || !name) return [];
-    const query = `
-      query($owner: String!, $name: String!) {
-        repository(owner: $owner, name: $name) {
-          mergeQueue {
-            entries(first: 50) {
-              nodes {
-                position
-                enqueuedAt
-                state
-                pullRequest {
-                  number
-                  title
-                  url
-                  isDraft
-                  author { login }
-                  headRefOid
-                }
-                headCommit {
-                  oid
-                  statusCheckRollup {
-                    contexts(first: ${CONTEXTS_PAGE_SIZE}) {
-                      pageInfo { hasNextPage endCursor }
-                      nodes { ${CONTEXT_NODE_FIELDS} }
-                    }
-                  }
-                }
-              }
-            }
+  async fetchRepositoryActivity(repos: string[], branchRepos: string[]): Promise<RepositoryActivity> {
+    const result: RepositoryActivity = { queues: [], heads: [], errors: [] };
+    const branches = new Set(branchRepos);
+    const unique = [...new Set(repos)];
+    // Small batches bound response size / GitHub's execution time.
+    for (let offset = 0; offset < unique.length; offset += 5) {
+      const batch = unique.slice(offset, offset + 5);
+      const fields = batch.map((repo, i) => {
+        const [owner, name] = repo.split("/");
+        return `r${i}: repository(owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(name)}) {
+          ${MERGE_QUEUE_FIELDS} ${branches.has(repo) ? DEFAULT_BRANCH_FIELDS : ""}
+        }`;
+      });
+      const data = await ghGraphql(`query { ${fields.join(" ")} }`, {}, "graphql.repo-activity");
+      for (const [i, repo] of batch.entries()) {
+        try {
+          // Isolate a repository permission/schema error instead of freezing
+          // every repository in its batch. Budget errors still stop transport.
+          const prefetched = data ? { repository: data[`r${i}`] } : undefined;
+          const queue = { repo, entries: await this.fetchMergeQueue(repo, prefetched) };
+          const branch = branches.has(repo) ? await this.fetchDefaultBranchHead(repo, prefetched) : undefined;
+          const entry = branch ? { queue, head: { repo, ...branch } } : { queue };
+          this.activityCache.set(repo, entry);
+          result.queues.push(queue);
+          if (entry.head) result.heads.push(entry.head);
+        } catch (err) {
+          result.errors!.push(`repository ${repo}: ${String(err)}`);
+          const cached = this.activityCache.get(repo);
+          if (cached) {
+            result.queues.push(cached.queue);
+            if (cached.head && branches.has(repo)) result.heads.push(cached.head);
           }
         }
       }
-    `;
-    const data = await ghGraphql(query, { owner, name });
+    }
+    return result;
+  }
+
+  async fetchMergeQueue(repo: string, prefetched?: Record<string, unknown>): Promise<RawMergeQueueEntry[]> {
+    const [owner, name] = repo.split("/");
+    if (!owner || !name) return [];
+    const query = `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { ${MERGE_QUEUE_FIELDS} } }`;
+    const data = prefetched ?? await ghGraphql(query, { owner, name }, "graphql.fetchMergeQueue");
+    if (!data) throw new Error("Missing repository activity");
     const repoNode = data?.["repository"] as Record<string, unknown> | undefined;
     const mq = repoNode?.["mergeQueue"] as Record<string, unknown> | undefined;
     const entries = mq?.["entries"] as Record<string, unknown> | undefined;
@@ -1068,30 +1100,12 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
     return entriesOut;
   }
 
-  async fetchDefaultBranchHead(repo: string): Promise<{ branch: string; sha: string; checks: RawCheckContext[] } | undefined> {
+  async fetchDefaultBranchHead(repo: string, prefetched?: Record<string, unknown>): Promise<{ branch: string; sha: string; checks: RawCheckContext[] } | undefined> {
     const [owner, name] = repo.split("/");
     if (!owner || !name) return undefined;
-    const query = `
-      query($owner: String!, $name: String!) {
-        repository(owner: $owner, name: $name) {
-          defaultBranchRef {
-            name
-            target {
-              ... on Commit {
-                oid
-                statusCheckRollup {
-                  contexts(first: ${CONTEXTS_PAGE_SIZE}) {
-                    pageInfo { hasNextPage endCursor }
-                    nodes { ${CONTEXT_NODE_FIELDS} }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-    const data = await ghGraphql(query, { owner, name });
+    const query = `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { ${DEFAULT_BRANCH_FIELDS} } }`;
+    const data = prefetched ?? await ghGraphql(query, { owner, name }, "graphql.fetchDefaultBranchHead");
+    if (!data) throw new Error("Missing repository activity");
     const repoNode = data?.["repository"] as Record<string, unknown> | undefined;
     const branchRef = repoNode?.["defaultBranchRef"] as Record<string, unknown> | undefined;
     if (!branchRef) return undefined;
@@ -1108,64 +1122,75 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
         checks.push(...(await fetchRemainingCommitContexts(owner, name, sha, cursor)));
       }
     }
-    return { branch, sha, checks };
+    const value = { branch, sha, checks };
+    this.headCache.set(repo, { at: Date.now(), value });
+    return value;
   }
 
-  async listCircleConfigFiles(repo: string): Promise<CircleConfigFile[]> {
+  async listCircleConfigFiles(repo: string, ref?: string): Promise<CircleConfigFile[]> {
     const [owner, name] = repo.split("/");
     if (!owner || !name) return [];
-    const head = await this.fetchDefaultBranchHead(repo);
+    const head = ref ? { sha: ref } : await this.definitionHead(repo);
     if (!head) return [];
-    const tree = (await ghRest(
+    const tree = (await this.immutable(
       `/repos/${owner}/${name}/git/trees/${head.sha}?recursive=1`,
     )) as { tree?: Array<{ path?: string; type?: string }> } | undefined;
-    const paths = (tree?.tree ?? [])
+    if (!tree?.tree) throw new Error(`Missing repository tree for ${repo}`);
+    const paths = tree.tree
       .filter((t) => t.type === "blob" && typeof t.path === "string"
         && t.path.startsWith(".circleci/") && /\.ya?ml$/i.test(t.path))
       .map((t) => t.path as string);
     const files: CircleConfigFile[] = [];
     for (const path of paths) {
-      const content = await this.fetchTextFile(repo, path);
+      const content = await this.fetchTextFile(repo, path, head.sha);
       if (content != null) files.push({ path, content });
     }
     return files;
   }
 
-  async fetchTextFile(repo: string, path: string): Promise<string | undefined> {
+  async fetchTextFile(repo: string, path: string, ref?: string): Promise<string | undefined> {
     const [owner, name] = repo.split("/");
     if (!owner || !name) return undefined;
-    const data = (await ghRest(
-      `/repos/${owner}/${name}/contents/${path.split("/").map(encodeURIComponent).join("/")}`,
-    )) as { content?: string; encoding?: string } | undefined;
+    const endpoint = `/repos/${owner}/${name}/contents/${path.split("/").map(encodeURIComponent).join("/")}${ref ? `?ref=${encodeURIComponent(ref)}` : ""}`;
+    const data = (await (ref ? this.immutable(endpoint) : ghRest(endpoint))) as { content?: string; encoding?: string } | undefined;
     if (!data?.content) return undefined;
     if (data.encoding === "base64") return Buffer.from(data.content, "base64").toString("utf8");
     return data.content;
   }
 
-  async fetchActionsWorkflows(repo: string): Promise<RawActionsWorkflow[]> {
+  async fetchActionsWorkflows(repo: string, ref?: string): Promise<RawActionsWorkflow[]> {
+    const cached = this.definitionCache.get(repo);
+    if (cached && Date.now() - cached.at < 30 * 60_000) return cached.value;
     const [owner, name] = repo.split("/");
     if (!owner || !name) return [];
     // The Actions API lists DELETED workflows as `state: "active"` with their
     // old `.github/workflows/` path, so it can't be trusted as "what's in the
     // repo". Intersect it with the workflow files that actually exist on the
     // default-branch tree.
-    const head = await this.fetchDefaultBranchHead(repo);
+    const head = ref ? { sha: ref } : await this.definitionHead(repo);
     if (!head) return [];
-    const tree = (await ghRest(`/repos/${owner}/${name}/git/trees/${head.sha}?recursive=1`)) as
+    const tree = (await this.immutable(`/repos/${owner}/${name}/git/trees/${head.sha}?recursive=1`)) as
       | { tree?: Array<{ path?: string; type?: string }> }
       | undefined;
+    if (!tree?.tree) throw new Error(`Missing repository tree for ${repo}`);
     const realPaths = new Set(
-      (tree?.tree ?? [])
+      tree.tree
         .filter((t) => t.type === "blob" && isCodeDefinedWorkflowPath(t.path))
         .map((t) => t.path as string),
     );
-    if (realPaths.size === 0) return [];
+    if (realPaths.size === 0) {
+      this.definitionCache.set(repo, { at: Date.now(), value: [] });
+      return [];
+    }
     const data = (await ghRest(`/repos/${owner}/${name}/actions/workflows?per_page=100`)) as
       | { workflows?: Array<{ id?: number; name?: string; path?: string; state?: string }> }
       | undefined;
-    return (data?.workflows ?? [])
+    if (!data?.workflows) throw new Error(`Missing workflow definitions for ${repo}`);
+    const workflows = data.workflows
       .filter((w) => typeof w.id === "number" && typeof w.path === "string" && realPaths.has(w.path))
       .map((w) => ({ id: w.id as number, name: w.name ?? "", path: w.path ?? "", state: w.state ?? "active" }));
+    this.definitionCache.set(repo, { at: Date.now(), value: workflows });
+    return workflows;
   }
 
   async fetchLatestWorkflowRun(repo: string, workflowId: number, branch: string): Promise<RawActionsRun | undefined> {
@@ -1188,7 +1213,7 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
     // The cheap latest-only query found a colliding PR/merge run. Page through
     // history only in this exceptional case to find the real latest branch run.
     const PER_PAGE = 100;
-    const MAX_PAGES = 20;
+    const MAX_PAGES = 10; // GitHub caps filtered run searches at 1,000 results.
     for (let page = 1; page <= MAX_PAGES; page++) {
       const data = (await ghRest(
         `/repos/${owner}/${name}/actions/workflows/${workflowId}/runs?branch=${encodeURIComponent(branch)}&per_page=${PER_PAGE}&page=${page}`,
@@ -1205,53 +1230,67 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
     return undefined;
   }
 
-  /**
-   * GitHub Actions runs on the default branch. Returns every trigger event
-   * (push, schedule, workflow_dispatch, …) within the window. Paginates the
-   * runs endpoint because busy repos (ethereum-optimism/optimism, …) push
-   * past the 100-per-page cap inside a single 24h window — without paging,
-   * the older runs get dropped and their workflows vanish from the board.
-   */
+  /** Bootstrap/reconcile history every 30m; between scans discover new runs
+   * using a stable overlapping window and refresh known active runs by ID.
+   * Periodic reconciliation catches reruns of old completed runs. */
   async fetchDefaultBranchRecentRuns(repo: string, branch: string, windowHours: number): Promise<RawWorkflowRun[]> {
-    const [owner, name] = repo.split("/");
-    if (!owner || !name || !branch) return [];
-    const sinceMs = Date.now() - windowHours * 3_600_000;
-    const sinceIso = new Date(sinceMs).toISOString().replace(/\.\d+Z$/, "Z");
-    const out: RawWorkflowRun[] = [];
-    const PER_PAGE = 100;
-    const MAX_PAGES = 20;
-    for (let page = 1; page <= MAX_PAGES; page++) {
-      const path = `/repos/${owner}/${name}/actions/runs?branch=${encodeURIComponent(branch)}&per_page=${PER_PAGE}&page=${page}&created=%3E%3D${encodeURIComponent(sinceIso)}`;
-      const data = (await ghRest(path)) as Record<string, unknown> | undefined;
-      const runs = (data?.["workflow_runs"] as Array<Record<string, unknown>>) ?? [];
-      if (runs.length === 0) break;
-      for (const r of runs) {
-        // Defend against GitHub's bare branch-name matching admitting fork PR
-        // and merge-queue runs into a default-branch query.
-        if (isPullRequestScopedActionsEvent(r["event"] as string | undefined)) continue;
-        const workflowId = (r["workflow_id"] as number) ?? 0;
-        if (!workflowId) continue;
-        // Skip GitHub-managed dynamic workflows (Dependabot, CodeQL default
-        // setup, Copilot, …); the Projects board shows code-defined workflows.
-        if (!isCodeDefinedWorkflowPath(r["path"] as string | undefined)) continue;
-        out.push({
-          workflowId,
-          workflowName: (r["name"] as string) ?? "",
-          event: (r["event"] as string) ?? "",
-          status: (r["status"] as string) ?? "",
-          conclusion: (r["conclusion"] as string | null) ?? undefined,
-          createdAt: (r["created_at"] as string) ?? "",
-          startedAt: (r["run_started_at"] as string | null) ?? undefined,
-          updatedAt: (r["updated_at"] as string) ?? "",
-          headSha: (r["head_sha"] as string) ?? "",
-          url: (r["html_url"] as string) ?? "",
-          runId: (r["id"] as number) ?? 0,
-        });
+    if (!repo.includes("/") || !branch) return [];
+    const now = Date.now();
+    const key = `${repo}:${branch}:${windowHours}`;
+    const cached = this.runsCache.get(key);
+    const reconcile = !cached || now - cached.reconciledAt >= 30 * 60_000;
+    // Fixed half-hour buckets make URLs/ETags reusable. Overlap prevents
+    // missing runs published around a boundary or after a short outage.
+    const since = Math.floor((reconcile ? now - windowHours * 3_600_000 : (cached?.refreshedAt ?? now) - 60 * 60_000) / 1_800_000) * 1_800_000;
+    const sinceIso = new Date(since).toISOString().replace(/\.\d+Z$/, "Z");
+    const runs = new Map(cached?.runs);
+    const seen = new Set<number>();
+    let newestCreatedAt = cached?.newestCreatedAt ?? 0;
+    for (let page = 1; page <= 10; page++) {
+      const path = `/repos/${repo}/actions/runs?branch=${encodeURIComponent(branch)}&per_page=100&page=${page}&created=%3E%3D${encodeURIComponent(sinceIso)}`;
+      const data = await ghRest(path) as { workflow_runs?: Array<Record<string, unknown>> } | undefined;
+      if (!data?.workflow_runs) throw new Error(`Missing Actions history for ${repo}`);
+      for (const raw of data.workflow_runs) {
+        newestCreatedAt = Math.max(newestCreatedAt, Date.parse(String(raw.created_at)) || 0);
+        const run = parseWorkflowRun(raw);
+        if (run) { runs.set(run.runId, run); seen.add(run.runId); }
       }
-      if (runs.length < PER_PAGE) break;
+      if (data.workflow_runs.length < 100) break;
+      // Runs are listed newest-first. Once a page overlaps the previous
+      // discovery watermark, older runs are already cached. Known active
+      // runs are refreshed below, and old reruns by periodic reconciliation.
+      if (!reconcile && data.workflow_runs.some(raw => Date.parse(String(raw.created_at)) < cached!.newestCreatedAt)) break;
     }
-    return out;
+    // A run can still be queued/running long after the discovery window.
+    for (const run of runs.values()) {
+      if (run.status === "completed" || seen.has(run.runId)) continue;
+      const raw = await ghRest(`/repos/${repo}/actions/runs/${run.runId}`) as Record<string, unknown> | undefined;
+      if (!raw) { runs.delete(run.runId); continue; } // deleted run (404)
+      const updated = parseWorkflowRun(raw);
+      if (updated) runs.set(updated.runId, updated);
+    }
+    // Keep latest terminal results even when new runs are active; evict only
+    // outside the display window. UI filtering handles the exact cutoff.
+    const cutoff = now - windowHours * 3_600_000;
+    for (const [id, run] of runs) {
+      if (Date.parse(run.createdAt) < cutoff && run.status === "completed") runs.delete(id);
+    }
+    this.runsCache.set(key, { reconciledAt: reconcile ? now : cached!.reconciledAt, refreshedAt: now, newestCreatedAt, runs });
+    return [...runs.values()];
   }
+
+}
+
+function parseWorkflowRun(r: Record<string, unknown>): RawWorkflowRun | undefined {
+  if (isPullRequestScopedActionsEvent(r.event as string | undefined) || !isCodeDefinedWorkflowPath(r.path as string | undefined)) return undefined;
+  if (!r.workflow_id || !r.id) return undefined;
+  return {
+    workflowId: r.workflow_id as number, runId: r.id as number,
+    workflowName: (r.name as string) ?? "", event: (r.event as string) ?? "",
+    status: (r.status as string) ?? "", conclusion: (r.conclusion as string | null) ?? undefined,
+    createdAt: (r.created_at as string) ?? "", startedAt: (r.run_started_at as string | null) ?? undefined,
+    updatedAt: (r.updated_at as string) ?? "", headSha: (r.head_sha as string) ?? "", url: (r.html_url as string) ?? "",
+  };
 }
 
 function normalizePr(n: Record<string, unknown>): RawPr {
@@ -1317,6 +1356,7 @@ function normalizePr(n: Record<string, unknown>): RawPr {
     // available in combined mode. Prefer the field so split mode (no inline
     // rollup) still gets the head SHA.
     headRefOid: (n["headRefOid"] as string) || (commit?.["oid"] as string) || "",
+    baseRefOid: (n["baseRefOid"] as string) ?? "",
     author: ((n["author"] as Record<string, unknown> | undefined)?.["login"] as string) ?? "",
     createdAt: (n["createdAt"] as string) ?? "",
     updatedAt: (n["updatedAt"] as string) ?? "",

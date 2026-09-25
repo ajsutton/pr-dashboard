@@ -2,7 +2,7 @@
  * Dashboard polling orchestrator.
  *
  * Cadence:
- *   - GitHub: open PRs + merge queues every 60s. Cheap (one GraphQL call).
+ *   - GitHub: open PRs + merge queues every 60s; cached metadata/history.
  *   - CircleCI: for each tracked head SHA + default branch, poll workflow/job
  *     state every 12s while any workflow is running, else every 60s.
  *
@@ -60,7 +60,7 @@ import type {
 const GITHUB_REFRESH_MS = 60_000;
 const CI_FAST_MS = 12_000;
 const CI_SLOW_MS = 60_000;
-const PROJECT_WORKFLOWS_MS = Number(process.env.DASHBOARD_PROJECT_WORKFLOWS_MS) || 300_000;
+const PROJECT_WORKFLOWS_MS = Number(process.env.DASHBOARD_PROJECT_WORKFLOWS_MS) || 1_800_000;
 const PROJECT_WORKFLOWS_ENABLED = process.env.DASHBOARD_PROJECT_WORKFLOWS !== "0";
 /** Window for the default-branch / projects view. Workflows whose latest run is older than this are dropped. */
 const DEFAULT_BRANCH_RUN_WINDOW_HOURS = 72;
@@ -70,6 +70,8 @@ export interface DashboardPollerOpts {
   circle?: CircleCiClient;
   onSnapshot: (snap: DashboardSnapshot) => void;
   logger?: (msg: string) => void;
+  /** Slow background polling when no dashboard is being viewed. */
+  hasViewers?: () => boolean;
   /**
    * Repos (owner/name) to always display, even when the viewer has no open
    * PRs against them. Shown in declared order ahead of PR-discovered repos.
@@ -109,12 +111,16 @@ export class DashboardPoller {
   private repos: string[] = [];
   private pinnedRepos: string[] = [];
   private errors: string[] = [];
+  private repoMeta = new Map<string, RepoMeta>();
   private stats: DashboardStats = emptyStats();
   private ghOrigin = "https://github.com";
 
   private ciByCommit = new Map<string, CiPipelineStatus>();
   private durationStats = new JobDurationStats();
 
+  private hasViewers: () => boolean;
+  private githubInFlight: Promise<void> | undefined;
+  private lastGithubRefresh = 0;
   private stopped = false;
   private githubTimer: ReturnType<typeof setTimeout> | null = null;
   private ciTimer: ReturnType<typeof setTimeout> | null = null;
@@ -133,6 +139,7 @@ export class DashboardPoller {
     this.circle = opts.circle ?? new RealCircleCiClient();
     this.onSnapshot = opts.onSnapshot;
     this.log = opts.logger ?? (() => {});
+    this.hasViewers = opts.hasViewers ?? (() => true);
     this.pinnedRepos = opts.pinnedRepos ?? [];
   }
 
@@ -161,13 +168,13 @@ export class DashboardPoller {
     this.githubTimer = setTimeout(async () => {
       await this.refreshGitHub();
       this.scheduleGitHub();
-    }, GITHUB_REFRESH_MS);
+    }, this.hasViewers() ? GITHUB_REFRESH_MS : Number(process.env.DASHBOARD_IDLE_REFRESH_MS) || 300_000);
   }
 
   private scheduleCi(): void {
     if (this.stopped) return;
     const anyRunning = this.anyCiRunning();
-    const delay = anyRunning ? CI_FAST_MS : CI_SLOW_MS;
+    const delay = !this.hasViewers() ? Number(process.env.DASHBOARD_IDLE_REFRESH_MS) || 300_000 : anyRunning ? CI_FAST_MS : CI_SLOW_MS;
     this.ciTimer = setTimeout(async () => {
       await this.refreshCi();
       this.scheduleCi();
@@ -188,10 +195,11 @@ export class DashboardPoller {
    * workflows list. Best-effort; folded into defaultBranchJobs on broadcast.
    */
   async refreshProjectWorkflows(): Promise<void> {
-    const next = new Map<string, ProjectWorkflow[]>();
+    const next = new Map(this.expectedByRepo);
     await Promise.all(
       this.pinnedRepos.map(async (repo) => {
         const list: ProjectWorkflow[] = [];
+        let failed = false;
         const [owner, name] = repo.split("/");
         if (!owner || !name) return;
         const defaultBranch = this.defaultBranchSeed.find((item) => item.repo === repo);
@@ -206,7 +214,7 @@ export class DashboardPoller {
           if (sha && cached && cached.sha === sha) {
             defined = cached.defined;
           } else {
-            const files = await this.github.listCircleConfigFiles(repo);
+            const files = await this.github.listCircleConfigFiles(repo, sha);
             defined = scanCircleWorkflows(files);
             if (sha) this.circleConfigCache.set(repo, { sha, defined });
           }
@@ -225,11 +233,12 @@ export class DashboardPoller {
           );
           list.push(...buildCircleProjectWorkflows({ repo, org: owner, defined, runsByName }));
         } catch (err) {
+          failed = true;
           this.errors.push(`project-workflows circle ${repo}: ${String(err)}`);
         }
         // GitHub Actions
         try {
-          const workflows = await this.github.fetchActionsWorkflows(repo);
+          const workflows = await this.github.fetchActionsWorkflows(repo, sha);
           // Workflow file bodies drive schedule and PR-only classification.
           // Cache them per head SHA so each tick only refetches the cheap
           // workflow list and each eligible workflow's latest branch run.
@@ -246,7 +255,7 @@ export class DashboardPoller {
                 if (cachedContent !== undefined) {
                   fileContent = cachedContent;
                 } else {
-                  fileContent = await this.github.fetchTextFile(repo, workflow.path);
+                  fileContent = await this.github.fetchTextFile(repo, workflow.path, sha);
                   if (sha && fileContent != null) fileCache!.byPath.set(workflow.path, fileContent);
                 }
               }
@@ -266,9 +275,10 @@ export class DashboardPoller {
           );
           list.push(...buildActionsProjectWorkflows(repo, inputs));
         } catch (err) {
+          failed = true;
           this.errors.push(`project-workflows actions ${repo}: ${String(err)}`);
         }
-        next.set(repo, list);
+        if (!failed) next.set(repo, list);
       }),
     );
     this.expectedByRepo = next;
@@ -283,7 +293,25 @@ export class DashboardPoller {
     return false;
   }
 
-  async refreshGitHub(): Promise<void> {
+  /** A reconnect must not start an overlapping refresh. */
+  wake(): void {
+    if (this.stopped || Date.now() - this.lastGithubRefresh < GITHUB_REFRESH_MS || this.githubInFlight) return;
+    if (this.githubTimer) clearTimeout(this.githubTimer);
+    void this.refreshGitHub().then(() => this.scheduleGitHub());
+  }
+
+  refreshGitHub(): Promise<void> {
+    if (!this.githubInFlight) {
+      this.githubInFlight = this.doRefreshGitHub().finally(() => {
+        this.githubInFlight = undefined;
+        this.lastGithubRefresh = Date.now();
+      });
+    }
+    return this.githubInFlight;
+  }
+
+  private async doRefreshGitHub(): Promise<void> {
+    this.errors = [];
     try {
       if (!this.viewerLogin) {
         const v = await this.github.fetchViewer();
@@ -307,9 +335,10 @@ export class DashboardPoller {
       // alias collapses onto its new name; otherwise the same repo shows up
       // twice (once via the env-var pin, once via the open PR). The same
       // batched query also returns each repo's open issue + PR totals.
-      let repoMeta = new Map<string, RepoMeta>();
+      let repoMeta = this.repoMeta;
       try {
         repoMeta = await this.github.resolveRepoMeta([...this.pinnedRepos, ...prRepos]);
+        this.repoMeta = repoMeta;
       } catch (err) {
         this.errors.push(`repo-meta: ${String(err)}`);
       }
@@ -334,7 +363,13 @@ export class DashboardPoller {
         ghOrigin: this.ghOrigin,
       });
 
-      const [mqResults, defaultBranchResults] = await Promise.all([
+      const branchRepos = process.env.DASHBOARD_PROJECT_REPOS === "pinned"
+        ? repos.filter(repo => this.pinnedRepos.some(pin => (repoMeta.get(pin)?.canonical ?? pin) === repo))
+        : repos;
+      const activity = this.github.fetchRepositoryActivity
+        ? await this.github.fetchRepositoryActivity(repos, branchRepos)
+        : undefined;
+      const [mqResults, defaultBranchResults] = activity ? [activity.queues, activity.heads] : await Promise.all([
         Promise.all(
           repos.map(async (repo) => {
             try {
@@ -343,24 +378,26 @@ export class DashboardPoller {
               return { repo, entries };
             } catch (err) {
               this.errors.push(`merge-queue ${repo}: ${String(err)}`);
-              return { repo, entries: [] };
+              return this.mergeQueues.find(q => q.repo === repo) ?? { repo, entries: [] };
             }
           }),
         ),
         Promise.all(
-          repos.map(async (repo) => {
+          branchRepos.map(async (repo) => {
             try {
               const head = await this.github.fetchDefaultBranchHead(repo);
               if (!head) return undefined;
               return { repo, branch: head.branch, sha: head.sha, checks: head.checks };
             } catch (err) {
               this.errors.push(`default-branch ${repo}: ${String(err)}`);
-              return undefined;
+              return this.defaultBranchSeed.find(d => d.repo === repo);
             }
           }),
         ),
       ]);
 
+      this.errors.push(...(activity?.errors ?? []));
+      for (const queue of mqResults) for (const entry of queue.entries) entry.mine = entry.author === this.viewerLogin;
       this.mergeQueues = mqResults.filter((m) => m.entries.length > 0);
       this.defaultBranchSeed = defaultBranchResults.filter((d): d is { repo: string; branch: string; sha: string; checks: RawCheckContext[] } => !!d);
 
@@ -374,7 +411,7 @@ export class DashboardPoller {
             return { repo: d.repo, runs };
           } catch (err) {
             this.errors.push(`recent-runs ${d.repo}: ${String(err)}`);
-            return { repo: d.repo, runs: [] as RawWorkflowRun[] };
+            return { repo: d.repo, runs: this.recentRunsByRepo.get(d.repo) ?? [] };
           }
         }),
       );
@@ -410,7 +447,6 @@ export class DashboardPoller {
       );
       this.circleRecordsByRepo = new Map(circleResults.map((r) => [r.repo, r.records]));
 
-      this.errors = [];
       this.attachCiToCards();
       this.broadcast();
     } catch (err) {

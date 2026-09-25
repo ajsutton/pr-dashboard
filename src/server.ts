@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import path from "node:path";
 import { watch, readFileSync } from "node:fs";
+import { githubUsage } from "./lib/github-transport.ts";
 import { DashboardPoller } from "./lib/dashboard-poller.ts";
 import { setDebugEnabled } from "./lib/debug.ts";
 import type { WsMessage } from "./types.ts";
@@ -80,9 +81,13 @@ const dashboardPoller = new DashboardPoller({
   onSnapshot: (snap) => broadcast({ type: "dashboard-snapshot", data: snap }),
   logger: (msg) => console.log(`[dashboard] ${msg}`),
   pinnedRepos: DASHBOARD_REPOS,
+  hasViewers: () => clients.size > 0,
   scopeRepos,
 });
 void dashboardPoller.start().catch((err) => console.error("[dashboard] start failed:", err));
+
+// Compact usage summaries go to Loki even with request debugging disabled.
+setInterval(() => console.log(`[github-usage] ${JSON.stringify(githubUsage())}`), 15 * 60_000);
 
 function serveHtml(filename: string): Response {
   const html = readFileSync(path.join(PUBLIC_DIR, filename), "utf-8");
@@ -109,6 +114,9 @@ const server = Bun.serve({
     if (pathname === "/dashboard.js") {
       return new Response(dashboardJs, { headers: { "Content-Type": "application/javascript; charset=utf-8" } });
     }
+    if (req.method === "GET" && pathname === "/api/github-usage") {
+      return Response.json(githubUsage());
+    }
     if (req.method === "GET" && pathname === "/api/dashboard") {
       return new Response(JSON.stringify(dashboardPoller.getSnapshot()), {
         headers: { "Content-Type": "application/json" },
@@ -119,6 +127,7 @@ const server = Bun.serve({
   websocket: {
     open(ws) {
       clients.add(ws as WS);
+      dashboardPoller.wake();
       const snap = dashboardPoller.getSnapshot();
       if (snap.prs.length > 0 || snap.user) {
         ws.send(JSON.stringify({ type: "dashboard-snapshot", data: snap }));
