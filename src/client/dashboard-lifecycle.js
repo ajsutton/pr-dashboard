@@ -74,25 +74,27 @@ export function queueLifecycleState(snap) {
 }
 
 /**
- * Other-owned merge-queue entries that vanished between snapshots with a
- * clear failure signal — i.e. they were ejected, not merged. Returned as a
- * Set of `repo#prNumber` keys.
+ * Other-owned merge-queue entries that vanished between snapshots, as Sets
+ * of `repo#prNumber` keys. An entry with a clear failure signal was ejected
+ * (`exploding`); any other vanished entry is assumed merged (`merging`).
+ * A manual dequeue is indistinguishable from a merge here. Entries of repos
+ * no longer in `nextRepos` are ignored: their queue was dropped, not drained.
  *
  * Own PRs are handled by `diffPrLifecycles` (ejecting/merging) which has
  * a stronger signal: it can see the PR re-appear in the stack.
- *
- * "Likely merged" non-mine vanishes (success/queued/no signal) are left
- * untouched so the dashboard doesn't celebrate a teammate's success with
- * an explosion.
  */
-export function diffQueueEjections(prev, next) {
+export function diffQueueExits(prev, next, nextRepos) {
   const exploding = new Set();
+  const merging = new Set();
   for (const [key, before] of prev) {
     if (next.has(key)) continue;
     if (before.mine) continue;
+    if (!nextRepos.has(key.slice(0, key.lastIndexOf("#")))) continue;
     if (before.state === "UNMERGEABLE" || before.ciRolledUp === "failed") {
       exploding.add(key);
+    } else {
+      merging.add(key);
     }
   }
-  return exploding;
+  return { exploding, merging };
 }

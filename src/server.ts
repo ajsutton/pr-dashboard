@@ -64,6 +64,16 @@ const DASHBOARD_REPOS = (process.env.DASHBOARD_REPOS ?? "")
   .map((s) => s.trim())
   .filter(Boolean);
 
+const MODE = process.env.DASHBOARD_MODE || "user";
+if (MODE !== "user" && MODE !== "generic") {
+  console.error(`[dashboard] DASHBOARD_MODE must be "user" or "generic", got "${MODE}"`);
+  process.exit(1);
+}
+if (MODE === "generic" && DASHBOARD_REPOS.length === 0) {
+  console.error("[dashboard] DASHBOARD_MODE=generic requires DASHBOARD_REPOS");
+  process.exit(1);
+}
+
 // When DASHBOARD_REPOS is set, scope all feeds to just those repos by default;
 // DASHBOARD_ALL_REPOS=1 restores the old behaviour (pin the repos but still
 // show the viewer's PRs/issues/reviews everywhere).
@@ -83,6 +93,7 @@ const dashboardPoller = new DashboardPoller({
   pinnedRepos: DASHBOARD_REPOS,
   hasViewers: () => clients.size > 0,
   scopeRepos,
+  mode: MODE,
 });
 void dashboardPoller.start().catch((err) => console.error("[dashboard] start failed:", err));
 

@@ -4,7 +4,7 @@ import {
   prLifecycleState,
   prVtName,
   queueLifecycleState,
-  diffQueueEjections,
+  diffQueueExits,
 } from './dashboard-lifecycle.js';
 
 const mk = (key, inQueue = false) => [key, { inQueue }];
@@ -113,52 +113,57 @@ describe('queueLifecycleState', () => {
   });
 });
 
-describe('diffQueueEjections', () => {
+describe('diffQueueExits', () => {
   const e = (overrides = {}) => ({ mine: false, state: 'QUEUED', ciRolledUp: 'running', ...overrides });
+  const exits = (prev, next, repos = ['o/r']) => {
+    const { exploding, merging } = diffQueueExits(prev, next, new Set(repos));
+    return { exploding: [...exploding], merging: [...merging] };
+  };
 
   it('explodes a non-mine entry that vanished after going UNMERGEABLE', () => {
     const prev = new Map([['o/r#1', e({ state: 'UNMERGEABLE' })]]);
-    const next = new Map();
-    expect([...diffQueueEjections(prev, next)]).toEqual(['o/r#1']);
+    expect(exits(prev, new Map())).toEqual({ exploding: ['o/r#1'], merging: [] });
   });
 
   it('explodes a non-mine entry that vanished after CI failed', () => {
     const prev = new Map([['o/r#1', e({ ciRolledUp: 'failed' })]]);
-    const next = new Map();
-    expect([...diffQueueEjections(prev, next)]).toEqual(['o/r#1']);
+    expect(exits(prev, new Map())).toEqual({ exploding: ['o/r#1'], merging: [] });
   });
 
-  it('does not explode a non-mine entry that vanished cleanly (likely merged)', () => {
+  it('merges a non-mine entry that vanished cleanly', () => {
     const prev = new Map([['o/r#1', e({ state: 'MERGEABLE', ciRolledUp: 'success' })]]);
-    const next = new Map();
-    expect([...diffQueueEjections(prev, next)]).toEqual([]);
+    expect(exits(prev, new Map())).toEqual({ exploding: [], merging: ['o/r#1'] });
   });
 
-  it('does not explode a non-mine entry that vanished while still running', () => {
+  it('merges a non-mine entry that vanished while still running', () => {
+    // A passing merge group lands every entry ahead of it, even ones whose own CI is still running.
     const prev = new Map([['o/r#1', e({ ciRolledUp: 'running' })]]);
-    const next = new Map();
-    expect([...diffQueueEjections(prev, next)]).toEqual([]);
+    expect(exits(prev, new Map())).toEqual({ exploding: [], merging: ['o/r#1'] });
   });
 
-  it('never explodes the dashboard user\'s own PRs (covered by ejecting/merging)', () => {
+  it('ignores the dashboard user\'s own PRs (covered by diffPrLifecycles)', () => {
     const prev = new Map([
       ['o/r#1', e({ mine: true, state: 'UNMERGEABLE' })],
       ['o/r#2', e({ mine: true, ciRolledUp: 'failed' })],
+      ['o/r#3', e({ mine: true, ciRolledUp: 'success' })],
     ]);
-    const next = new Map();
-    expect([...diffQueueEjections(prev, next)]).toEqual([]);
+    expect(exits(prev, new Map())).toEqual({ exploding: [], merging: [] });
   });
 
-  it('does not explode entries that are still present', () => {
-    const prev = new Map([['o/r#1', e({ ciRolledUp: 'failed' })]]);
-    const next = new Map([['o/r#1', e({ ciRolledUp: 'failed' })]]);
-    expect([...diffQueueEjections(prev, next)]).toEqual([]);
+  it('ignores entries that are still present', () => {
+    const prev = new Map([['o/r#1', e({ ciRolledUp: 'failed' })], ['o/r#2', e()]]);
+    const next = new Map([['o/r#1', e({ ciRolledUp: 'failed' })], ['o/r#2', e()]]);
+    expect(exits(prev, next)).toEqual({ exploding: [], merging: [] });
   });
 
-  it('does not explode brand-new entries', () => {
-    const prev = new Map();
+  it('ignores entries whose repo left the board', () => {
+    const prev = new Map([['o/r#1', e()], ['o/s#2', e({ ciRolledUp: 'failed' })]]);
+    expect(exits(prev, new Map(), [])).toEqual({ exploding: [], merging: [] });
+  });
+
+  it('ignores brand-new entries', () => {
     const next = new Map([['o/r#1', e({ ciRolledUp: 'failed' })]]);
-    expect([...diffQueueEjections(prev, next)]).toEqual([]);
+    expect(exits(new Map(), next)).toEqual({ exploding: [], merging: [] });
   });
 });
 

@@ -21,7 +21,7 @@ describe("dashboard server", () => {
 
   beforeEach(async () => {
     proc = Bun.spawn(["bun", SERVER_PATH], {
-      env: { ...process.env, DASHBOARD_PORT: String(port), GH_TOKEN: "", DASHBOARD_REPOS: "" },
+      env: { ...process.env, DASHBOARD_PORT: String(port), GH_TOKEN: "", DASHBOARD_REPOS: "", DASHBOARD_MODE: "" },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -34,7 +34,12 @@ describe("dashboard server", () => {
     const r = await fetch(`http://127.0.0.1:${port}/`);
     expect(r.status).toBe(200);
     const html = await r.text();
-    expect(html).toContain("PR Dashboard");
+    expect(html).toContain("<title>CI Dashboard</title>");
+  });
+
+  it("reports user mode by default", async () => {
+    const r = await fetch(`http://127.0.0.1:${port}/api/dashboard`);
+    expect((await r.json()).mode).toBe("user");
   });
 
   it("returns 200 for /api/dashboard", async () => {
@@ -65,7 +70,7 @@ describe("dashboard server", () => {
   it("respects BASE_PATH in the base href", async () => {
     proc?.kill();
     proc = Bun.spawn(["bun", SERVER_PATH], {
-      env: { ...process.env, DASHBOARD_PORT: String(port + 1), GH_TOKEN: "", BASE_PATH: "/dashboard" },
+      env: { ...process.env, DASHBOARD_PORT: String(port + 1), GH_TOKEN: "", BASE_PATH: "/dashboard", DASHBOARD_MODE: "" },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -73,5 +78,41 @@ describe("dashboard server", () => {
     const r = await fetch(`http://127.0.0.1:${port + 1}/`);
     const html = await r.text();
     expect(html).toContain('<base href="/dashboard/">');
+  });
+
+  it("reports generic mode when DASHBOARD_MODE=generic", async () => {
+    proc?.kill();
+    proc = Bun.spawn(["bun", SERVER_PATH], {
+      env: { ...process.env, DASHBOARD_PORT: String(port + 2), GH_TOKEN: "", DASHBOARD_MODE: "generic", DASHBOARD_REPOS: "o/r" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    await waitForReady(port + 2);
+    const r = await fetch(`http://127.0.0.1:${port + 2}/api/dashboard`);
+    expect((await r.json()).mode).toBe("generic");
+  });
+});
+
+describe("dashboard server config", () => {
+  async function exitWith(env: Record<string, string>): Promise<{ code: number; stderr: string }> {
+    const proc = Bun.spawn(["bun", SERVER_PATH], {
+      env: { ...process.env, DASHBOARD_PORT: "0", GH_TOKEN: "", ...env },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const code = await proc.exited;
+    return { code, stderr: await new Response(proc.stderr).text() };
+  }
+
+  it("refuses generic mode without DASHBOARD_REPOS", async () => {
+    const { code, stderr } = await exitWith({ DASHBOARD_MODE: "generic", DASHBOARD_REPOS: "" });
+    expect(code).not.toBe(0);
+    expect(stderr).toContain("DASHBOARD_REPOS");
+  });
+
+  it("refuses an unknown DASHBOARD_MODE", async () => {
+    const { code, stderr } = await exitWith({ DASHBOARD_MODE: "team" });
+    expect(code).not.toBe(0);
+    expect(stderr).toContain("DASHBOARD_MODE");
   });
 });

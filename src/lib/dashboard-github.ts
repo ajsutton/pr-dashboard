@@ -1056,8 +1056,11 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
     const query = `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { ${MERGE_QUEUE_FIELDS} } }`;
     const data = prefetched ?? await ghGraphql(query, { owner, name }, "graphql.fetchMergeQueue");
     if (!data) throw new Error("Missing repository activity");
-    const repoNode = data?.["repository"] as Record<string, unknown> | undefined;
-    const mq = repoNode?.["mergeQueue"] as Record<string, unknown> | undefined;
+    const repoNode = data["repository"] as Record<string, unknown> | null | undefined;
+    // Null on a partial GraphQL error or no access; an empty queue here would
+    // read as every entry having merged.
+    if (!repoNode) throw new Error("Repository missing from GitHub response");
+    const mq = repoNode["mergeQueue"] as Record<string, unknown> | undefined;
     const entries = mq?.["entries"] as Record<string, unknown> | undefined;
     const nodes = (entries?.["nodes"] as Array<Record<string, unknown>>) ?? [];
 

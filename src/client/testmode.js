@@ -251,6 +251,7 @@ export function injectTestPr(snap, stateSpec) {
 export function emptyTestSnapshot() {
   return {
     generatedAt: new Date().toISOString(),
+    mode: "user",
     user: "test-user",
     prs: [],
     stacks: [],

@@ -7,7 +7,7 @@
          nginx subpath proxy). Keep it before stylesheet/script links so they
          resolve through the proxy. -->
     <base href="/">
-    <title>PR Dashboard</title>
+    <title>CI Dashboard</title>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='12' fill='%230a0e1c'/><rect x='10' y='13' width='44' height='10' rx='3' fill='%2325c66a'/><rect x='10' y='27' width='30' height='10' rx='3' fill='%23ffd24a'/><rect x='10' y='41' width='38' height='10' rx='3' fill='%23ff5147'/></svg>" />
     <link rel="stylesheet" href="dashboard.css" />
   </head>
@@ -22,7 +22,7 @@
     </div>
 
     <main class="db-main">
-      <section class="db-section db-stats-section" id="db-stats-section">
+      <section class="db-section db-stats-section" id="db-stats-section" hidden>
         <div class="db-stats" id="db-stats"></div>
       </section>
 
@@ -31,7 +31,7 @@
         <div class="db-queues" id="db-queues"></div>
       </section>
 
-      <section class="db-section" id="db-stacks-section">
+      <section class="db-section" id="db-stacks-section" hidden>
         <h2 class="db-section-title">My PRs</h2>
         <div class="db-stacks" id="db-stacks"></div>
       </section>

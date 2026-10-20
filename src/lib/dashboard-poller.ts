@@ -21,6 +21,7 @@ import {
   type RawStatItem,
   type RawWorkflowRun,
   type RepoMeta,
+  type ViewerWorkload,
 } from "./dashboard-github.ts";
 import {
   RealCircleCiClient,
@@ -47,6 +48,7 @@ import {
 } from "./project-workflows.ts";
 import type {
   CiPipelineStatus,
+  DashboardMode,
   DashboardSnapshot,
   DashboardStats,
   DefaultBranchJob,
@@ -83,6 +85,8 @@ export interface DashboardPollerOpts {
    * client. Ignored when a custom `github` client is supplied.
    */
   scopeRepos?: string[];
+  /** Defaults to `user`. Generic mode never queries the viewer or their workload. */
+  mode?: DashboardMode;
 }
 
 interface CiTarget {
@@ -101,6 +105,7 @@ export class DashboardPoller {
   private circle: CircleCiClient;
   private onSnapshot: (snap: DashboardSnapshot) => void;
   private log: (msg: string) => void;
+  private mode: DashboardMode;
 
   private viewerLogin = "";
   private prs: PrCard[] = [];
@@ -141,10 +146,11 @@ export class DashboardPoller {
     this.log = opts.logger ?? (() => {});
     this.hasViewers = opts.hasViewers ?? (() => true);
     this.pinnedRepos = opts.pinnedRepos ?? [];
+    this.mode = opts.mode ?? "user";
   }
 
   async start(): Promise<void> {
-    this.log("start: fetching viewer + open PRs…");
+    this.log(this.mode === "generic" ? "start: generic mode, fetching pinned repos…" : "start: fetching viewer + open PRs…");
     await this.refreshGitHub();
     this.scheduleGitHub();
     await this.refreshCi();
@@ -310,23 +316,28 @@ export class DashboardPoller {
     return this.githubInFlight;
   }
 
+  private async refreshViewerWorkload(): Promise<ViewerWorkload> {
+    if (!this.viewerLogin) {
+      const v = await this.github.fetchViewer();
+      this.viewerLogin = v.login;
+      this.log(`viewer = ${this.viewerLogin || "(empty)"}`);
+    }
+    const workload = await this.github.fetchViewerWorkload();
+    this.rawPrs = workload.prs;
+    this.prs = buildPrCards(this.rawPrs);
+    this.log(
+      `fetched ${this.rawPrs.length} open PRs, ${workload.assignedIssues.length} assigned issues, ${workload.reviewRequestedPrs.length} review-requested PRs`,
+    );
+    // Track the gh origin we're talking to (github.com vs GHE) so we can
+    // build links for repos that have no PR to derive an origin from.
+    this.ghOrigin = deriveGhOrigin(this.rawPrs, this.ghOrigin);
+    return workload;
+  }
+
   private async doRefreshGitHub(): Promise<void> {
     this.errors = [];
     try {
-      if (!this.viewerLogin) {
-        const v = await this.github.fetchViewer();
-        this.viewerLogin = v.login;
-        this.log(`viewer = ${this.viewerLogin || "(empty)"}`);
-      }
-      const workload = await this.github.fetchViewerWorkload();
-      this.rawPrs = workload.prs;
-      this.prs = buildPrCards(this.rawPrs);
-      this.log(
-        `fetched ${this.rawPrs.length} open PRs, ${workload.assignedIssues.length} assigned issues, ${workload.reviewRequestedPrs.length} review-requested PRs`,
-      );
-      // Track the gh origin we're talking to (github.com vs GHE) so we can
-      // build links for repos that have no PR to derive an origin from.
-      this.ghOrigin = deriveGhOrigin(this.rawPrs, this.ghOrigin);
+      const workload = this.mode === "user" ? await this.refreshViewerWorkload() : undefined;
 
       const prRepos = Array.from(new Set(this.rawPrs.map((p) => p.repo))).sort(
         (a, b) => a.localeCompare(b),
@@ -345,23 +356,25 @@ export class DashboardPoller {
       this.repos = dedupReposByCanonical(this.pinnedRepos, prRepos, repoMeta);
       const repos = this.repos;
 
-      // Build a canonical-keyed meta map so totals match the deduped repo list.
-      const canonicalMeta = new Map<string, RepoMeta>();
-      for (const m of repoMeta.values()) {
-        canonicalMeta.set(m.canonical, m);
+      if (workload) {
+        // Build a canonical-keyed meta map so totals match the deduped repo list.
+        const canonicalMeta = new Map<string, RepoMeta>();
+        for (const m of repoMeta.values()) {
+          canonicalMeta.set(m.canonical, m);
+        }
+        this.stats = buildStats({
+          viewerLogin: this.viewerLogin,
+          assignedIssues: workload.assignedIssues,
+          assignedIssuesTotalCount: workload.assignedIssuesTotalCount,
+          reviewRequestedPrs: workload.reviewRequestedPrs,
+          reviewRequestedPrsTotalCount: workload.reviewRequestedPrsTotalCount,
+          personalReviewRequestedPrs: workload.personalReviewRequestedPrs,
+          personalReviewRequestsTotalCount: workload.personalReviewRequestsTotalCount,
+          orderedRepos: this.repos,
+          repoMeta: canonicalMeta,
+          ghOrigin: this.ghOrigin,
+        });
       }
-      this.stats = buildStats({
-        viewerLogin: this.viewerLogin,
-        assignedIssues: workload.assignedIssues,
-        assignedIssuesTotalCount: workload.assignedIssuesTotalCount,
-        reviewRequestedPrs: workload.reviewRequestedPrs,
-        reviewRequestedPrsTotalCount: workload.reviewRequestedPrsTotalCount,
-        personalReviewRequestedPrs: workload.personalReviewRequestedPrs,
-        personalReviewRequestsTotalCount: workload.personalReviewRequestsTotalCount,
-        orderedRepos: this.repos,
-        repoMeta: canonicalMeta,
-        ghOrigin: this.ghOrigin,
-      });
 
       const branchRepos = process.env.DASHBOARD_PROJECT_REPOS === "pinned"
         ? repos.filter(repo => this.pinnedRepos.some(pin => (repoMeta.get(pin)?.canonical ?? pin) === repo))
@@ -373,9 +386,7 @@ export class DashboardPoller {
         Promise.all(
           repos.map(async (repo) => {
             try {
-              const entries = await this.github.fetchMergeQueue(repo);
-              for (const e of entries) e.mine = e.author === this.viewerLogin;
-              return { repo, entries };
+              return { repo, entries: await this.github.fetchMergeQueue(repo) };
             } catch (err) {
               this.errors.push(`merge-queue ${repo}: ${String(err)}`);
               return this.mergeQueues.find(q => q.repo === repo) ?? { repo, entries: [] };
@@ -397,7 +408,9 @@ export class DashboardPoller {
       ]);
 
       this.errors.push(...(activity?.errors ?? []));
-      for (const queue of mqResults) for (const entry of queue.entries) entry.mine = entry.author === this.viewerLogin;
+      for (const queue of mqResults) {
+        for (const entry of queue.entries) entry.mine = !!this.viewerLogin && entry.author === this.viewerLogin;
+      }
       this.mergeQueues = mqResults.filter((m) => m.entries.length > 0);
       this.defaultBranchSeed = defaultBranchResults.filter((d): d is { repo: string; branch: string; sha: string; checks: RawCheckContext[] } => !!d);
 
@@ -711,6 +724,7 @@ export class DashboardPoller {
   private snapshot(): DashboardSnapshot {
     return {
       generatedAt: new Date().toISOString(),
+      mode: this.mode,
       user: this.viewerLogin,
       prs: this.prs,
       stacks: buildStacks(this.prs),

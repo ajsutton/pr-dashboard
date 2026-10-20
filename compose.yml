@@ -9,6 +9,7 @@ services:
     environment:
       DASHBOARD_REPOS: ${DASHBOARD_REPOS:-}
       DASHBOARD_ALL_REPOS: ${DASHBOARD_ALL_REPOS:-}
+      DASHBOARD_MODE: ${DASHBOARD_MODE:-}
       DASHBOARD_DEBUG: ${DASHBOARD_DEBUG:-}
       # Compose runs from a checkout with ./src mounted — restart on changes.
       DASHBOARD_WATCH: "1"

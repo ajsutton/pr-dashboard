@@ -196,6 +196,17 @@ describe("repository and PR caches", () => {
     expect(second.heads[0]!.checks[0]!.status).toBe("COMPLETED");
   });
 
+  test("repository activity keeps the cached queue when a repository resolves to null", async () => {
+    const entry = { position: 1, state: "QUEUED", enqueuedAt: "", pullRequest: { number: 7, title: "t", url: "u", author: { login: "a" } } };
+    respond = () => json({ data: { r0: { mergeQueue: { entries: { nodes: [entry] } } } } });
+    const client = new RealDashboardGitHubClient();
+    expect((await client.fetchRepositoryActivity(["o/r"], []))!.queues[0]!.entries).toHaveLength(1);
+    respond = () => json({ data: { r0: null } });
+    const second = await client.fetchRepositoryActivity(["o/r"], []);
+    expect(second.queues[0]!.entries.map(e => e.prNumber)).toEqual([7]);
+    expect(second.errors).toHaveLength(1);
+  });
+
   test("CircleCI and Actions discovery share immutable head trees and file contents", async () => {
     respond = call => {
       if (call.query) return json({ data: { repository: { defaultBranchRef: { name: "main", target: { oid: "sha" } } } } });

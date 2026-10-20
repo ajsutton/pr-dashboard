@@ -8,6 +8,7 @@ import {
 } from "./dashboard-poller.ts";
 import type {
   DashboardGitHubClient,
+  RawMergeQueueEntry,
   RawPr,
   RawReviewRequestItem,
   RawStatItem,
@@ -551,4 +552,76 @@ describe("DashboardPoller refreshProjectWorkflows", () => {
     expect(poller.getSnapshot().errors?.some(e => e.includes("paused until reset"))).toBe(true);
   });
 
+});
+
+describe("DashboardPoller generic mode", () => {
+  function queueEntry(prNumber: number, author: string): RawMergeQueueEntry {
+    return {
+      repo: "o/r",
+      position: prNumber,
+      prNumber,
+      prTitle: `PR ${prNumber}`,
+      prUrl: `https://github.com/o/r/pull/${prNumber}`,
+      author,
+      state: "QUEUED",
+      enqueuedAt: "2026-10-01T00:00:00Z",
+      mine: false,
+      headSha: `sha-${prNumber}`,
+      headChecks: [],
+    };
+  }
+
+  function client(calls: string[]): DashboardGitHubClient {
+    return {
+      fetchViewer: () => {
+        calls.push("fetchViewer");
+        return Promise.resolve({ login: "me" });
+      },
+      fetchViewerWorkload: () => {
+        calls.push("fetchViewerWorkload");
+        return Promise.reject(new Error("generic mode must not fetch the viewer workload"));
+      },
+      resolveRepoMeta: (repos) => Promise.resolve(new Map(repos.map((r) => [r, meta(r, 3, 4)]))),
+      fetchMergeQueue: (repo) => {
+        calls.push(`fetchMergeQueue ${repo}`);
+        // A deleted account's PR has no author login.
+        return Promise.resolve([queueEntry(1, "me"), queueEntry(2, "someone"), queueEntry(3, "")]);
+      },
+      fetchDefaultBranchHead: () => Promise.resolve(undefined),
+      fetchDefaultBranchRecentRuns: () => Promise.resolve([]),
+      listCircleConfigFiles: () => Promise.resolve([]),
+      fetchTextFile: () => Promise.resolve(undefined),
+      fetchActionsWorkflows: () => Promise.resolve([]),
+      fetchLatestWorkflowRun: () => Promise.resolve(undefined),
+    };
+  }
+
+  test("skips viewer queries and shows only pinned repos", async () => {
+    const calls: string[] = [];
+    const poller = new DashboardPoller({
+      mode: "generic",
+      pinnedRepos: ["o/r"],
+      github: client(calls),
+      onSnapshot: () => {},
+    });
+
+    await poller.refreshGitHub();
+    const snap = poller.getSnapshot();
+
+    expect(calls).not.toContain("fetchViewer");
+    expect(calls).not.toContain("fetchViewerWorkload");
+    expect(calls).toContain("fetchMergeQueue o/r");
+    expect(snap.errors).toEqual([]);
+    expect(snap.mode).toBe("generic");
+    expect(snap.user).toBe("");
+    expect(snap.prs).toEqual([]);
+    expect(snap.repos).toEqual(["o/r"]);
+    expect(snap.mergeQueues[0]!.entries.map((e) => e.mine)).toEqual([false, false, false]);
+    expect(snap.stats.totalIssuesByRepo).toEqual([]);
+  });
+
+  test("defaults to user mode", () => {
+    const poller = new DashboardPoller({ github: client([]), onSnapshot: () => {} });
+    expect(poller.getSnapshot().mode).toBe("user");
+  });
 });

@@ -1,5 +1,5 @@
 /**
- * PR Dashboard client. Talks to the same WebSocket as the main app
+ * CI Dashboard client. Talks to the same WebSocket as the main app
  * and renders the latest dashboard-snapshot messages.
  */
 
@@ -10,7 +10,7 @@ import {
   prLifecycleState,
   prVtName,
   queueLifecycleState,
-  diffQueueEjections,
+  diffQueueExits,
 } from "./dashboard-lifecycle.js";
 import { renderFailuresBlock } from "./dashboard-failures.js";
 import { projectJobCompare } from "./jobsort.js";
@@ -36,6 +36,7 @@ const queuesEl = isBrowser ? document.getElementById("db-queues") : null;
 const jobsEl = isBrowser ? document.getElementById("db-jobs") : null;
 const stacksSection = isBrowser ? document.getElementById("db-stacks-section") : null;
 const stacksEl = isBrowser ? document.getElementById("db-stacks") : null;
+const statsSection = isBrowser ? document.getElementById("db-stats-section") : null;
 const statsEl = isBrowser ? document.getElementById("db-stats") : null;
 
 // ID of the currently open stat overlay, or null. Survives re-renders so a
@@ -361,6 +362,12 @@ function renderStatCard(card) {
 let latestStatCards = [];
 function renderStats(snap) {
   if (!statsEl) return;
+  // Per-repo totals alone don't earn the space; the personal cards need a viewer.
+  statsSection.hidden = snap.mode === "generic";
+  if (statsSection.hidden) {
+    statsEl.innerHTML = "";
+    return;
+  }
   const stats = snap.stats ?? {
     assignedIssues: [],
     reviewRequests: [],
@@ -1049,15 +1056,17 @@ function render({ reset = false } = {}) {
     clearLifecycleClasses();
   }
   userEl.textContent = snap.user || "";
+  userEl.hidden = !snap.user;
 
   const nextState = prLifecycleState(snap);
   activeLifecycles = diffPrLifecycles(prevPrState, nextState);
   const nextQueueState = queueLifecycleState(snap);
-  const exploding = diffQueueEjections(prevQueueState, nextQueueState);
+  const queueExits = diffQueueExits(prevQueueState, nextQueueState, new Set(snap.repos ?? []));
   markExiting(activeLifecycles.exiting);
-  const slurps = prepareSlurps(activeLifecycles.merging);
-  const explosions = prepareExplosions(exploding);
-  const mergedRepos = reposWithMerges(activeLifecycles.merging);
+  const merging = new Set([...activeLifecycles.merging, ...queueExits.merging]);
+  const slurps = prepareSlurps(merging);
+  const explosions = prepareExplosions(queueExits.exploding);
+  const mergedRepos = reposWithMerges(merging);
   // Keep the queue row mounted for the slurp + ship-sail to play out, even
   // if the snapshot already shows the queue as empty. The follow-up
   // re-render (scheduled inside holdQueueRowOpen) cleans up the stub.

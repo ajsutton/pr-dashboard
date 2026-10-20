@@ -156,8 +156,13 @@ export interface DashboardStats {
   totalPrsByRepo: RepoCount[];
 }
 
+/** `generic` shows only pinned-repo data, with nothing tied to the token owner. */
+export type DashboardMode = "user" | "generic";
+
 export interface DashboardSnapshot {
   generatedAt: string;
+  mode: DashboardMode;
+  /** Viewer login. Empty in generic mode. */
   user: string;
   prs: PrCard[];
   /** Connected components keyed by stack root, ordered base-up. */

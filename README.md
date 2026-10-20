@@ -2,6 +2,8 @@
 
 Real-time PR + CI dashboard. Polls GitHub and CircleCI for PRs you author or review and rolls up their status into a single view.
 
+Generic mode (`DASHBOARD_MODE=generic`) shows a shared board for the pinned repos. It shows merge queues and Projects, and omits My PRs, the stat cards and the viewer login.
+
 ## Setup
 
 Requires [Bun](https://bun.sh) (1.x).
@@ -27,6 +29,7 @@ Open `http://127.0.0.1:3456`.
 | `BASE_PATH` | `/` | subpath prefix for reverse-proxy hosting |
 | `DASHBOARD_REPOS` | (empty) | comma-separated `owner/repo` list. When set, the dashboard scopes everything (your PRs, assigned issues, review requests) to just these repos. When empty, your PRs everywhere are shown. |
 | `DASHBOARD_ALL_REPOS` | (off) | set to `1` to keep showing your PRs/issues/reviews across **all** repos even when `DASHBOARD_REPOS` is set — the listed repos are then just pinned, not a filter. |
+| `DASHBOARD_MODE` | `user` | set to `generic` for a board with no data specific to the token owner. Generic mode requires `DASHBOARD_REPOS` and shows only those repos. |
 | `GH_TOKEN` | (required) | GitHub PAT or `gh auth token` |
 | `CITOKEN` | (optional) | CircleCI personal API token — needed to read private CircleCI projects and to lift the per-IP rate limit |
 | `DASHBOARD_DEBUG` | (off) | set to `1` (or pass `--debug`) to trace every GitHub + CircleCI request/response — incl. partial GraphQL `errors` — to the logs. Use to diagnose an empty/blank board. Verbose. |
