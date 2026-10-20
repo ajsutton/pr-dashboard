@@ -1057,6 +1057,7 @@ function render({ reset = false } = {}) {
   }
   userEl.textContent = snap.user || "";
   userEl.hidden = !snap.user;
+  document.body.dataset.mode = snap.mode;
 
   const nextState = prLifecycleState(snap);
   activeLifecycles = diffPrLifecycles(prevPrState, nextState);

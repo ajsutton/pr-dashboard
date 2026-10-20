@@ -171,6 +171,8 @@ body { min-height: 100vh; font-size: 16px; }
   letter-spacing: 0.16em;
   color: var(--fg-mute);
 }
+/* Without My PRs above it, the Projects heading separates nothing. */
+body[data-mode="generic"] #db-jobs-section .db-section-title { display: none; }
 
 /* ============================== Stats row ============================== */
 /*
