@@ -20,6 +20,12 @@ function numberSetting(name: string, fallback: number): number {
 
 export class GitHubPausedError extends Error {}
 
+export class GitHubHttpError extends Error {
+  constructor(operation: string, readonly status: number) {
+    super(`GitHub ${operation}: HTTP ${status}`);
+  }
+}
+
 export function githubUsage() {
   return {
     budgets: structuredClone(budgets), secondaryUntil,
@@ -134,7 +140,7 @@ async function request(resource: Resource, path: string, body: string | undefine
       remember(path, { value: undefined, missingUntil: now + 30 * 60_000 });
       return undefined;
     }
-    if (!res.ok) { count.errors++; throw new Error(`GitHub ${operation}: HTTP ${res.status}`); }
+    if (!res.ok) { count.errors++; throw new GitHubHttpError(operation, res.status); }
     if (resource === "graphql") {
       const cost = data?.data?.rateLimit?.cost;
       if (typeof cost === "number") count.points += cost;
