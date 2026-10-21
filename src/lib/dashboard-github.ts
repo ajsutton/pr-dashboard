@@ -165,7 +165,7 @@ export interface DashboardGitHubClient {
   fetchLatestWorkflowRun(repo: string, workflowId: number, branch: string): Promise<RawActionsRun | undefined>;
 }
 
-import { ghRest, ghGraphql } from "./github-transport.ts";
+import { GitHubHttpError, ghRest, ghGraphql } from "./github-transport.ts";
 export { ghRest, ghGraphql, rateLimitDelayMs } from "./github-transport.ts";
 
 const CONTEXTS_PAGE_SIZE = 100;
@@ -791,7 +791,11 @@ export class RealDashboardGitHubClient implements DashboardGitHubClient {
 
   private async fetchWorkloadRaw(): Promise<ViewerWorkload> {
     if (!this.splitWorkload) {
-      const combined = await this.fetchWorkloadCombined();
+      const combined = await this.fetchWorkloadCombined().catch((err: unknown) => {
+        // GitHub answers a GraphQL query that overruns its ~10s budget with a 502/504 gateway error.
+        if (err instanceof GitHubHttpError && (err.status === 502 || err.status === 504)) return undefined;
+        throw err;
+      });
       if (combined) return combined;
       this.splitWorkload = true;
       debugLog(
