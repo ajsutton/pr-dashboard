@@ -606,6 +606,29 @@ describe("fetchViewerWorkload (adaptive combined→split + repo scoping)", () =>
     expect(triedCombinedAgain).toBe(false);
   });
 
+  test.each([502, 504])("falls back to split requests when the combined query gets an HTTP %d gateway timeout", async (status) => {
+    stubByQuery((q) => {
+      if (q.includes("rulesets(first:")) return { body: { data: { repository: { rulesets: { nodes: [] } } } } };
+      const hasSearch = q.includes("assignedIssues");
+      const hasPr = q.includes("pullRequests") || q.includes("prs: search");
+      if (hasSearch && hasPr) return { status, body: { message: "Server Error" } };
+      if (q.includes("object(oid:")) {
+        return { body: { data: { c0: { object: { statusCheckRollup: { contexts: { pageInfo: { hasNextPage: false }, nodes: [] } } } } } } };
+      }
+      if (hasSearch) return { body: { data: emptySearches } };
+      return { body: { data: { viewer: { pullRequests: { nodes: [samplePrNode] } } } } };
+    });
+
+    const wl = await new RealDashboardGitHubClient().fetchViewerWorkload();
+    expect(wl.prs.map((p) => p.number)).toEqual([1]);
+  });
+
+  test("propagates non-gateway HTTP errors from the combined query", async () => {
+    stubByQuery(() => ({ status: 401, body: { message: "Bad credentials" } }));
+    await expect(new RealDashboardGitHubClient().fetchViewerWorkload()).rejects.toThrow("HTTP 401");
+    expect(queries).toHaveLength(1);
+  });
+
   test("filters results to the configured repos client-side, leaving the queries unscoped", async () => {
     const inScope = { ...samplePrNode, number: 1, repository: { ...samplePrNode.repository, nameWithOwner: "org/a" } };
     const outScope = { ...samplePrNode, number: 2, repository: { ...samplePrNode.repository, nameWithOwner: "org/other" } };
