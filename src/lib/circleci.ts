@@ -96,7 +96,7 @@ export interface CircleCiClient {
    * Page through pipelines on the branch newest-first, stopping once we
    * either pass the time cutoff or run out of pages. Used by the default
    * branch view so jobs that ran on older commits within the window still
-   * show up.
+   * show up. Throws when any page fails, because a partial list hides newer runs.
    */
   listPipelinesForBranchSince(org: string, repo: string, branch: string, sinceMs: number): Promise<RawPipeline[]>;
   /** Returns undefined when the request fails, so callers can keep earlier data. */
@@ -142,6 +142,14 @@ export class RealCircleCiClient implements CircleCiClient {
   }
 
   private async get<T>(pathWithQuery: string): Promise<T | undefined> {
+    try {
+      return await this.getOrThrow<T>(pathWithQuery);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async getOrThrow<T>(pathWithQuery: string): Promise<T> {
     const started = Date.now();
     const authed = this.headers["Circle-Token"] ? "authed" : "anon";
     debugLog("circleci", `request GET ${pathWithQuery} (${authed})`);
@@ -149,11 +157,11 @@ export class RealCircleCiClient implements CircleCiClient {
       const res = await fetch(`${BASE}${pathWithQuery}`, { headers: this.headers });
       const text = await res.text().catch(() => "");
       debugLog("circleci", `GET ${pathWithQuery} → HTTP ${res.status} in ${Date.now() - started}ms: ${truncateBody(text)}`);
-      if (!res.ok) return undefined;
+      if (!res.ok) throw new Error(`CircleCI GET ${pathWithQuery}: HTTP ${res.status}`);
       return JSON.parse(text) as T;
     } catch (err) {
       debugLog("circleci", `GET ${pathWithQuery} → error: ${String(err)}`);
-      return undefined;
+      throw err;
     }
   }
 
@@ -180,11 +188,11 @@ export class RealCircleCiClient implements CircleCiClient {
     for (let page = 0; page < MAX_PAGES; page++) {
       const params = new URLSearchParams({ branch });
       if (pageToken) params.set("page-token", pageToken);
-      const data = await this.get<{
+      const data = await this.getOrThrow<{
         items?: Array<{ id: string; number: number; created_at: string; vcs?: { revision?: string; branch?: string } }>;
         next_page_token?: string | null;
       }>(`/project/gh/${org}/${repo}/pipeline?${params.toString()}`);
-      const items = data?.items ?? [];
+      const items = data.items ?? [];
       if (items.length === 0) break;
       let foundOld = false;
       for (const p of items) {
@@ -200,7 +208,7 @@ export class RealCircleCiClient implements CircleCiClient {
         });
       }
       if (foundOld) break;
-      pageToken = data?.next_page_token ?? undefined;
+      pageToken = data.next_page_token ?? undefined;
       if (!pageToken) break;
     }
     return out;

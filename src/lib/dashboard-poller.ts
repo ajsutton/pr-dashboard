@@ -70,6 +70,8 @@ const DEFAULT_BRANCH_RUN_WINDOW_HOURS = 72;
  * CircleCI workflow states that cannot change. `on_hold` is absent because an approval resumes it.
  * `failing` is absent because the workflow still runs.
  */
+/** A rerun adds a workflow to a finished pipeline, so finished pipelines are fetched again after this time. */
+const CIRCLE_FINISHED_REFETCH_MS = 10 * 60_000;
 const CIRCLE_TERMINAL_WORKFLOW_STATUSES = new Set([
   "success", "failed", "error", "canceled", "cancelled", "unauthorized", "not_run",
 ]);
@@ -146,7 +148,7 @@ export class DashboardPoller {
    *  keyed by head SHA. */
   private actionsFileCache = new Map<string, { sha: string; byPath: Map<string, string> }>();
   /** Default-branch CircleCI workflows by pipeline id. A failed fetch keeps the last good list. */
-  private circleWorkflowCache = new Map<string, { createdAtMs: number; workflows: RawWorkflow[] }>();
+  private circleWorkflowCache = new Map<string, { createdAtMs: number; fetchedAtMs: number; workflows: RawWorkflow[] }>();
 
   constructor(opts: DashboardPollerOpts) {
     this.github = opts.github ?? new RealDashboardGitHubClient({ scopeRepos: opts.scopeRepos ?? [] });
@@ -463,7 +465,7 @@ export class DashboardPoller {
             return { repo: d.repo, records };
           } catch (err) {
             this.errors.push(`circle-default-branch ${d.repo}: ${String(err)}`);
-            return { repo: d.repo, records: [] as CircleWorkflowRecord[] };
+            return { repo: d.repo, records: this.circleRecordsByRepo.get(d.repo) ?? [] };
           }
         }),
       );
@@ -656,12 +658,17 @@ export class DashboardPoller {
   /** Each poll lists many pipelines. CircleCI rate limits the workflow requests, so reuse finished results. */
   private async defaultBranchCircleWorkflows(p: CircleRawPipeline): Promise<RawWorkflow[]> {
     const cached = this.circleWorkflowCache.get(p.id);
-    if (cached && cached.workflows.length > 0 && cached.workflows.every((w) => CIRCLE_TERMINAL_WORKFLOW_STATUSES.has(w.status))) {
+    if (
+      cached &&
+      Date.now() - cached.fetchedAtMs < CIRCLE_FINISHED_REFETCH_MS &&
+      cached.workflows.length > 0 &&
+      cached.workflows.every((w) => CIRCLE_TERMINAL_WORKFLOW_STATUSES.has(w.status))
+    ) {
       return cached.workflows;
     }
     const workflows = await this.circle.getWorkflows(p.id);
     if (!workflows) return cached?.workflows ?? [];
-    this.circleWorkflowCache.set(p.id, { createdAtMs: Date.parse(p.createdAt), workflows });
+    this.circleWorkflowCache.set(p.id, { createdAtMs: Date.parse(p.createdAt), fetchedAtMs: Date.now(), workflows });
     return workflows;
   }
 

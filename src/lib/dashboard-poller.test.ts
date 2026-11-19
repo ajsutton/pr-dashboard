@@ -634,11 +634,14 @@ describe("DashboardPoller CircleCI default-branch workflows", () => {
   let pipelines: Array<{ id: string; number: number; created_at: string }>;
   let workflowResponses: Map<string, () => Response>;
   let workflowRequests: Map<string, number>;
+  let pipelineListResponse: ((pageToken: string | null) => Response | undefined) | undefined;
 
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
   const ago = (ms: number) => new Date(now - ms).toISOString();
-  const workflows = (...items: Array<{ id: string; status: string; createdAgoMs: number }>) => () =>
-    json({ items: items.map((w) => ({ id: w.id, name: "fault-proofs", status: w.status, created_at: ago(w.createdAgoMs) })) });
+  const workflows = (...items: Array<{ id: string; status: string; createdAgoMs: number }>) => {
+    const createdAt = items.map((w) => ago(w.createdAgoMs));
+    return () => json({ items: items.map((w, i) => ({ id: w.id, name: "fault-proofs", status: w.status, created_at: createdAt[i] })) });
+  };
 
   beforeEach(() => {
     now = Date.parse("2026-11-19T12:00:00Z");
@@ -646,9 +649,13 @@ describe("DashboardPoller CircleCI default-branch workflows", () => {
     pipelines = [];
     workflowResponses = new Map();
     workflowRequests = new Map();
+    pipelineListResponse = undefined;
     globalThis.fetch = (async (url: any) => {
       const path = new URL(String(url)).pathname;
       if (path === "/api/v2/project/gh/o/r/pipeline") {
+        const pageToken = new URL(String(url)).searchParams.get("page-token");
+        const override = pipelineListResponse?.(pageToken);
+        if (override) return override;
         return json({ items: pipelines.map((p) => ({ ...p, vcs: { revision: `sha-${p.number}`, branch: "main" } })) });
       }
       const wf = path.match(/^\/api\/v2\/pipeline\/([^/]+)\/workflow$/);
@@ -756,5 +763,78 @@ describe("DashboardPoller CircleCI default-branch workflows", () => {
     workflowResponses.set("fresh", workflows({ id: "wf-f", status: "success", createdAgoMs: 1 * HOUR }));
     await poller.refreshGitHub();
     expect([...poller["circleWorkflowCache"].keys()]).toEqual(["fresh"]);
+  });
+
+  test("fetches a finished pipeline again after the refetch interval and shows a rerun", async () => {
+    pipelines = [{ id: "done", number: 1, created_at: ago(1 * HOUR) }];
+    workflowResponses.set("done", workflows({ id: "wf-1", status: "failed", createdAgoMs: 1 * HOUR }));
+    const poller = newPoller();
+    await poller.refreshGitHub();
+    expect(latestStatus(poller)).toBe("failed");
+
+    now += 9 * 60_000;
+    await poller.refreshGitHub();
+    expect(workflowRequests.get("done")).toBe(1);
+
+    now += 2 * 60_000;
+    workflowResponses.set("done", workflows(
+      { id: "wf-1", status: "failed", createdAgoMs: 1 * HOUR },
+      { id: "wf-2", status: "success", createdAgoMs: 5 * 60_000 },
+    ));
+    await poller.refreshGitHub();
+    expect(workflowRequests.get("done")).toBe(2);
+    expect(latestStatus(poller)).toBe("success");
+  });
+
+  test("retries a failed refetch of a finished pipeline on the next poll", async () => {
+    pipelines = [{ id: "done", number: 1, created_at: ago(1 * HOUR) }];
+    workflowResponses.set("done", workflows({ id: "wf-1", status: "success", createdAgoMs: 1 * HOUR }));
+    const poller = newPoller();
+    await poller.refreshGitHub();
+
+    now += 11 * 60_000;
+    workflowResponses.set("done", () => json({ message: "Too many requests" }, 429));
+    await poller.refreshGitHub();
+    expect(workflowRequests.get("done")).toBe(2);
+    expect(latestStatus(poller)).toBe("success");
+
+    now += 60_000;
+    await poller.refreshGitHub();
+    expect(workflowRequests.get("done")).toBe(3);
+    expect(latestStatus(poller)).toBe("success");
+  });
+
+  test("keeps the previous cards when the pipeline list is rate limited", async () => {
+    pipelines = [{ id: "done", number: 1, created_at: ago(1 * HOUR) }];
+    workflowResponses.set("done", workflows({ id: "wf-1", status: "success", createdAgoMs: 1 * HOUR }));
+    const poller = newPoller();
+    await poller.refreshGitHub();
+    const before = poller.getSnapshot().defaultBranchJobs;
+    expect(before.length).toBe(1);
+
+    pipelineListResponse = () => json({ message: "Too many requests" }, 429);
+    await poller.refreshGitHub();
+    expect(poller.getSnapshot().defaultBranchJobs).toEqual(before);
+    expect(poller.getSnapshot().errors.some((e) => e.includes("circle-default-branch o/r"))).toBe(true);
+  });
+
+  test("keeps the previous cards when a later pipeline page is rate limited", async () => {
+    pipelines = [
+      { id: "new", number: 2, created_at: ago(1 * HOUR) },
+      { id: "old", number: 1, created_at: ago(5 * HOUR) },
+    ];
+    workflowResponses.set("new", workflows({ id: "wf-new", status: "success", createdAgoMs: 1 * HOUR }));
+    workflowResponses.set("old", workflows({ id: "wf-old", status: "failed", createdAgoMs: 5 * HOUR }));
+    const poller = newPoller();
+    await poller.refreshGitHub();
+    const before = poller.getSnapshot().defaultBranchJobs;
+    expect(before[0]?.latest?.status).toBe("success");
+
+    // Page one holds only the old pipeline, so a partial list would show the old failure.
+    pipelineListResponse = (pageToken) => pageToken === null
+      ? json({ items: [{ id: "old", number: 1, created_at: ago(5 * HOUR), vcs: { revision: "sha-1", branch: "main" } }], next_page_token: "p2" })
+      : json({ message: "Too many requests" }, 429);
+    await poller.refreshGitHub();
+    expect(poller.getSnapshot().defaultBranchJobs).toEqual(before);
   });
 });
