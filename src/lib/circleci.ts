@@ -99,7 +99,8 @@ export interface CircleCiClient {
    * show up.
    */
   listPipelinesForBranchSince(org: string, repo: string, branch: string, sinceMs: number): Promise<RawPipeline[]>;
-  getWorkflows(pipelineId: string): Promise<RawWorkflow[]>;
+  /** Returns undefined when the request fails, so callers can keep earlier data. */
+  getWorkflows(pipelineId: string): Promise<RawWorkflow[] | undefined>;
   getJobs(workflowId: string): Promise<RawJob[]>;
   getFailedTests(org: string, repo: string, jobNumber: number): Promise<string[]>;
   getInsightsWorkflowNames(org: string, repo: string): Promise<string[]>;
@@ -218,9 +219,10 @@ export class RealCircleCiClient implements CircleCiClient {
     };
   }
 
-  async getWorkflows(pipelineId: string): Promise<RawWorkflow[]> {
+  async getWorkflows(pipelineId: string): Promise<RawWorkflow[] | undefined> {
     const data = await this.get<{ items?: RawWorkflow[] }>(`/pipeline/${pipelineId}/workflow`);
-    return data?.items ?? [];
+    if (!data) return undefined;
+    return data.items ?? [];
   }
 
   async getJobs(workflowId: string): Promise<RawJob[]> {

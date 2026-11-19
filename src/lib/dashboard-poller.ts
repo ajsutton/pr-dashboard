@@ -66,6 +66,13 @@ const PROJECT_WORKFLOWS_MS = Number(process.env.DASHBOARD_PROJECT_WORKFLOWS_MS) 
 const PROJECT_WORKFLOWS_ENABLED = process.env.DASHBOARD_PROJECT_WORKFLOWS !== "0";
 /** Window for the default-branch / projects view. Workflows whose latest run is older than this are dropped. */
 const DEFAULT_BRANCH_RUN_WINDOW_HOURS = 72;
+/**
+ * CircleCI workflow states that cannot change. `on_hold` is absent because an approval resumes it.
+ * `failing` is absent because the workflow still runs.
+ */
+const CIRCLE_TERMINAL_WORKFLOW_STATUSES = new Set([
+  "success", "failed", "error", "canceled", "cancelled", "unauthorized", "not_run",
+]);
 
 export interface DashboardPollerOpts {
   github?: DashboardGitHubClient;
@@ -138,6 +145,8 @@ export class DashboardPoller {
   /** GitHub Actions workflow file bodies per repo (for trigger classification),
    *  keyed by head SHA. */
   private actionsFileCache = new Map<string, { sha: string; byPath: Map<string, string> }>();
+  /** Default-branch CircleCI workflows by pipeline id. A failed fetch keeps the last good list. */
+  private circleWorkflowCache = new Map<string, { createdAtMs: number; workflows: RawWorkflow[] }>();
 
   constructor(opts: DashboardPollerOpts) {
     this.github = opts.github ?? new RealDashboardGitHubClient({ scopeRepos: opts.scopeRepos ?? [] });
@@ -447,7 +456,7 @@ export class DashboardPoller {
             const records: CircleWorkflowRecord[] = [];
             await Promise.all(
               pipelines.map(async (p: CircleRawPipeline) => {
-                const wfs = await this.circle.getWorkflows(p.id);
+                const wfs = await this.defaultBranchCircleWorkflows(p);
                 for (const wf of wfs) records.push({ workflow: wf, pipeline: p });
               }),
             );
@@ -459,6 +468,10 @@ export class DashboardPoller {
         }),
       );
       this.circleRecordsByRepo = new Map(circleResults.map((r) => [r.repo, r.records]));
+      const windowStartMs = Date.now() - DEFAULT_BRANCH_RUN_WINDOW_HOURS * 3_600_000;
+      for (const [id, entry] of this.circleWorkflowCache) {
+        if (entry.createdAtMs < windowStartMs) this.circleWorkflowCache.delete(id);
+      }
 
       this.attachCiToCards();
       this.broadcast();
@@ -640,6 +653,18 @@ export class DashboardPoller {
     return Array.from(seen.values());
   }
 
+  /** Each poll lists many pipelines. CircleCI rate limits the workflow requests, so reuse finished results. */
+  private async defaultBranchCircleWorkflows(p: CircleRawPipeline): Promise<RawWorkflow[]> {
+    const cached = this.circleWorkflowCache.get(p.id);
+    if (cached && cached.workflows.length > 0 && cached.workflows.every((w) => CIRCLE_TERMINAL_WORKFLOW_STATUSES.has(w.status))) {
+      return cached.workflows;
+    }
+    const workflows = await this.circle.getWorkflows(p.id);
+    if (!workflows) return cached?.workflows ?? [];
+    this.circleWorkflowCache.set(p.id, { createdAtMs: Date.parse(p.createdAt), workflows });
+    return workflows;
+  }
+
   private async fetchPipeline(t: CiTarget): Promise<CiPipelineStatus | undefined> {
     const pipeline = await this.resolvePipeline(t);
     if (!pipeline) return undefined;
@@ -647,7 +672,7 @@ export class DashboardPoller {
     const pipelineNumber = pipeline.number;
 
     const workflows = await this.circle.getWorkflows(pipelineId);
-    if (workflows.length === 0) return undefined;
+    if (!workflows || workflows.length === 0) return undefined;
 
     const workflowJobs = await Promise.all(
       workflows.map(async (wf) => {

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   buildStats,
   buildTotalsByRepo,
@@ -623,5 +623,138 @@ describe("DashboardPoller generic mode", () => {
   test("defaults to user mode", () => {
     const poller = new DashboardPoller({ github: client([]), onSnapshot: () => {} });
     expect(poller.getSnapshot().mode).toBe("user");
+  });
+});
+
+describe("DashboardPoller CircleCI default-branch workflows", () => {
+  const HOUR = 3_600_000;
+  const realFetch = globalThis.fetch;
+  const realNow = Date.now;
+  let now: number;
+  let pipelines: Array<{ id: string; number: number; created_at: string }>;
+  let workflowResponses: Map<string, () => Response>;
+  let workflowRequests: Map<string, number>;
+
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+  const ago = (ms: number) => new Date(now - ms).toISOString();
+  const workflows = (...items: Array<{ id: string; status: string; createdAgoMs: number }>) => () =>
+    json({ items: items.map((w) => ({ id: w.id, name: "fault-proofs", status: w.status, created_at: ago(w.createdAgoMs) })) });
+
+  beforeEach(() => {
+    now = Date.parse("2026-11-19T12:00:00Z");
+    Date.now = () => now;
+    pipelines = [];
+    workflowResponses = new Map();
+    workflowRequests = new Map();
+    globalThis.fetch = (async (url: any) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/api/v2/project/gh/o/r/pipeline") {
+        return json({ items: pipelines.map((p) => ({ ...p, vcs: { revision: `sha-${p.number}`, branch: "main" } })) });
+      }
+      const wf = path.match(/^\/api\/v2\/pipeline\/([^/]+)\/workflow$/);
+      if (wf) {
+        workflowRequests.set(wf[1]!, (workflowRequests.get(wf[1]!) ?? 0) + 1);
+        return workflowResponses.get(wf[1]!)?.() ?? json({ items: [] });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    }) as typeof fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    Date.now = realNow;
+  });
+
+  function github(): DashboardGitHubClient {
+    return {
+      fetchViewer: () => Promise.resolve({ login: "me" }),
+      fetchViewerWorkload: () => Promise.resolve({
+        prs: [], assignedIssues: [], assignedIssuesTotalCount: 0, reviewRequestedPrs: [],
+        reviewRequestedPrsTotalCount: 0, personalReviewRequestedPrs: [], personalReviewRequestsTotalCount: 0,
+      }),
+      resolveRepoMeta: () => Promise.resolve(new Map()),
+      fetchMergeQueue: () => Promise.resolve([]),
+      fetchDefaultBranchHead: () => Promise.resolve({
+        branch: "main",
+        sha: "head",
+        checks: [{ __typename: "StatusContext", context: "ci/circleci", targetUrl: "https://circleci.com/gh/o/r/1" }],
+      }),
+      fetchDefaultBranchRecentRuns: () => Promise.resolve([]),
+      listCircleConfigFiles: () => Promise.resolve([]),
+      fetchTextFile: () => Promise.resolve(undefined),
+      fetchActionsWorkflows: () => Promise.resolve([]),
+      fetchLatestWorkflowRun: () => Promise.resolve(undefined),
+    };
+  }
+
+  const newPoller = () => new DashboardPoller({ pinnedRepos: ["o/r"], github: github(), onSnapshot: () => {} });
+  const latestStatus = (poller: DashboardPoller) =>
+    poller.getSnapshot().defaultBranchJobs.find((j) => j.name === "fault-proofs")?.latest?.status;
+
+  test("keeps cached workflows when a fetch is rate limited", async () => {
+    pipelines = [
+      { id: "new", number: 2, created_at: ago(1 * HOUR) },
+      { id: "old", number: 1, created_at: ago(5 * HOUR) },
+    ];
+    workflowResponses.set("new", workflows({ id: "wf-new", status: "success", createdAgoMs: 1 * HOUR }));
+    workflowResponses.set("old", workflows({ id: "wf-old", status: "failed", createdAgoMs: 5 * HOUR }));
+    const poller = newPoller();
+    await poller.refreshGitHub();
+    expect(latestStatus(poller)).toBe("success");
+
+    workflowResponses.set("new", () => json({ message: "Too many requests" }, 429));
+    await poller.refreshGitHub();
+    expect(latestStatus(poller)).toBe("success");
+  });
+
+  test("keeps cached workflows of a running pipeline when a refetch is rate limited", async () => {
+    pipelines = [
+      { id: "new", number: 2, created_at: ago(1 * HOUR) },
+      { id: "old", number: 1, created_at: ago(5 * HOUR) },
+    ];
+    workflowResponses.set("new", workflows({ id: "wf-new", status: "running", createdAgoMs: 1 * HOUR }));
+    workflowResponses.set("old", workflows({ id: "wf-old", status: "failed", createdAgoMs: 5 * HOUR }));
+    const poller = newPoller();
+    await poller.refreshGitHub();
+    expect(latestStatus(poller)).toBe("running");
+
+    workflowResponses.set("new", () => json({ message: "Too many requests" }, 429));
+    await poller.refreshGitHub();
+    expect(latestStatus(poller)).toBe("running");
+    expect(workflowRequests.get("new")).toBe(2);
+  });
+
+  test("fetches a finished pipeline once and a running pipeline every poll", async () => {
+    pipelines = [
+      { id: "running", number: 2, created_at: ago(1 * HOUR) },
+      { id: "done", number: 1, created_at: ago(5 * HOUR) },
+    ];
+    workflowResponses.set("running", workflows(
+      { id: "wf-r1", status: "success", createdAgoMs: 1 * HOUR },
+      { id: "wf-r2", status: "on_hold", createdAgoMs: 1 * HOUR },
+    ));
+    workflowResponses.set("done", workflows(
+      { id: "wf-d1", status: "success", createdAgoMs: 5 * HOUR },
+      { id: "wf-d2", status: "canceled", createdAgoMs: 5 * HOUR },
+    ));
+    const poller = newPoller();
+    await poller.refreshGitHub();
+    await poller.refreshGitHub();
+    await poller.refreshGitHub();
+    expect(workflowRequests.get("done")).toBe(1);
+    expect(workflowRequests.get("running")).toBe(3);
+  });
+
+  test("evicts cached pipelines that leave the window", async () => {
+    pipelines = [{ id: "done", number: 1, created_at: ago(1 * HOUR) }];
+    workflowResponses.set("done", workflows({ id: "wf-d", status: "success", createdAgoMs: 1 * HOUR }));
+    const poller = newPoller();
+    await poller.refreshGitHub();
+    expect([...poller["circleWorkflowCache"].keys()]).toEqual(["done"]);
+
+    now += 72 * HOUR;
+    pipelines = [{ id: "fresh", number: 2, created_at: ago(1 * HOUR) }];
+    workflowResponses.set("fresh", workflows({ id: "wf-f", status: "success", createdAgoMs: 1 * HOUR }));
+    await poller.refreshGitHub();
+    expect([...poller["circleWorkflowCache"].keys()]).toEqual(["fresh"]);
   });
 });
